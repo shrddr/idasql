@@ -7,6 +7,11 @@
 
 #include "disassembly.hpp"
 
+#include <xsql/vtable.hpp>
+
+#include "address_resolution.hpp"
+#include "decompiler.hpp"
+
 namespace idasql {
 namespace disassembly {
 
@@ -216,6 +221,37 @@ public:
   int64_t rowid() const override { return static_cast<int64_t>(current_.ea); }
 };
 
+class DisasmCallAtEaGenerator : public xsql::Generator<DisasmCallInfo> {
+  DisasmCallInfo row_{};
+  bool valid_ = false;
+  bool started_ = false;
+
+public:
+  explicit DisasmCallAtEaGenerator(ea_t ea) {
+    insn_t insn;
+    if (ea != BADADDR && decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
+      row_.ea = ea;
+      func_t *f = get_func(ea);
+      row_.func_addr = f ? f->start_ea : 0;
+      row_.callee_addr = get_first_fcref_from(ea);
+      if (row_.callee_addr != BADADDR) {
+        row_.callee_name = safe_name(row_.callee_addr);
+      }
+      valid_ = true;
+    }
+  }
+
+  bool next() override {
+    if (started_ || !valid_)
+      return false;
+    started_ = true;
+    return true;
+  }
+
+  const DisasmCallInfo &current() const override { return row_; }
+  int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
+};
+
 // ============================================================================
 // LoopsInFuncIterator
 // ============================================================================
@@ -360,6 +396,56 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
       .column_text(
           "callee_name",
           [](const DisasmCallInfo &r) -> std::string { return r.callee_name; })
+      .column_rw(
+          "callee_type", xsql::ColumnType::Text,
+          [](xsql::FunctionContext &ctx, const DisasmCallInfo &r) {
+            tinfo_t tif;
+            if (!decompiler::get_callee_tinfo_at(r.ea, tif)) {
+              ctx.result_null();
+              return;
+            }
+            qstring out;
+            if (tif.print(&out, nullptr, PRTYPE_1LINE | PRTYPE_SEMI)) {
+              ctx.result_text(out.c_str());
+            } else {
+              ctx.result_null();
+            }
+          },
+          [](DisasmCallInfo &row, xsql::FunctionArg val) -> bool {
+            if (val.is_nochange())
+              return true;
+            if (!decompiler::hexrays_available()) {
+              xsql::set_vtab_error("disasm_calls: cannot write callee_type: Hex-Rays decompiler is unavailable");
+              return false;
+            }
+            const bool is_clear = val.is_null() || val.as_text().empty();
+            if (is_clear) {
+              if (!decompiler::clear_callee_tinfo_at(row.ea)) {
+                xsql::set_vtab_error("disasm_calls: failed to clear callee_type");
+                return false;
+              }
+              return true;
+            }
+            tinfo_t tif;
+            const std::string decl = val.as_text();
+            if (!decompiler::parse_callee_decl(decl.c_str(), tif)) {
+              xsql::set_vtab_error("disasm_calls: failed to parse callee_type declaration");
+              return false;
+            }
+            if (!decompiler::apply_callee_tinfo_at(row.ea, tif)) {
+              xsql::set_vtab_error("disasm_calls: failed to apply callee_type");
+              return false;
+            }
+            return true;
+          })
+      .row_lookup([](DisasmCallInfo &row, int64_t raw_rowid) -> bool {
+        const ea_t ea = static_cast<ea_t>(static_cast<uint64_t>(raw_rowid));
+        DisasmCallAtEaGenerator gen(ea);
+        if (!gen.next())
+          return false;
+        row = gen.current();
+        return true;
+      })
       .filter_eq(
           "func_addr",
           [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
@@ -367,6 +453,20 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
                 static_cast<ea_t>(func_addr));
           },
           10.0)
+      .constraint_filter(
+          {xsql::required_eq("ea", "")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<DisasmCallInfo>> {
+            ea_t ea = BADADDR;
+            std::string error;
+            if (args.empty() ||
+                !resolve_address_value(args.front().value, "ea", ea, &error)) {
+              xsql::set_vtab_error(error.empty() ? "disasm_calls: missing ea constraint" : error);
+              return nullptr;
+            }
+            return std::make_unique<DisasmCallAtEaGenerator>(ea);
+          },
+          1.0, 1.0)
       .build();
 }
 

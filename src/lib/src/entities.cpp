@@ -148,13 +148,13 @@ bool update_function_comment(FuncRow &row, xsql::FunctionArg val,
     return true;
   }
 
-  auto_wait();
+  idasql_auto_wait();
   const bool ok = set_func_cmt(f, requested_comment.c_str(), repeatable);
   if (ok) {
     original_comment = requested_comment;
     decompiler::invalidate_decompiler_cache(row.start_ea);
   }
-  auto_wait();
+  idasql_auto_wait();
   return ok;
 }
 
@@ -202,12 +202,12 @@ CachedTableDef<FuncRow> define_funcs() {
             if (requested_name == row.original_name) {
               return true;
             }
-            auto_wait();
+            idasql_auto_wait();
             bool ok =
                 set_name(row.start_ea, requested_name.c_str(), SN_CHECK) != 0;
             if (ok)
               decompiler::invalidate_decompiler_cache(row.start_ea);
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_text_rw(
@@ -226,7 +226,7 @@ CachedTableDef<FuncRow> define_funcs() {
             if (requested_decl == row.original_prototype) {
               return true;
             }
-            auto_wait();
+            idasql_auto_wait();
             bool ok = false;
             if (new_decl == nullptr || new_decl[0] == '\0') {
               del_tinfo(row.start_ea);
@@ -236,7 +236,7 @@ CachedTableDef<FuncRow> define_funcs() {
             }
             if (ok)
               decompiler::invalidate_decompiler_cache(row.start_ea);
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_text_rw(
@@ -321,9 +321,9 @@ CachedTableDef<FuncRow> define_funcs() {
                      return get_cc_name(row.fi.get_cc());
                    })
       .deletable([](FuncRow &row) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         bool ok = del_func(row.start_ea);
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
@@ -337,14 +337,14 @@ CachedTableDef<FuncRow> define_funcs() {
         if (get_func(ea) != nullptr)
           return false;
 
-        auto_wait();
+        idasql_auto_wait();
         // end_ea from col 4 if provided, else BADADDR (IDA auto-detects)
         ea_t end = BADADDR;
         if (argc > 4 && !argv[4].is_null())
           end = static_cast<ea_t>(argv[4].as_int64());
 
         bool ok = add_func(ea, end);
-        auto_wait();
+        idasql_auto_wait();
 
         if (!ok)
           return false;
@@ -387,7 +387,7 @@ VTableDef define_segments() {
           },
           // Setter - rename segment
           [](size_t i, const char *new_name) -> bool {
-            auto_wait();
+            idasql_auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
             if (!s) {
               xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
@@ -397,7 +397,7 @@ VTableDef define_segments() {
             if (!ok)
               xsql::set_vtab_error("segments: failed to rename segment " +
                                    idasql::format_ea_hex(s->start_ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_text_rw(
@@ -409,7 +409,7 @@ VTableDef define_segments() {
           },
           // Setter - change segment class
           [](size_t i, const char *new_class) -> bool {
-            auto_wait();
+            idasql_auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
             if (!s) {
               xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
@@ -419,7 +419,7 @@ VTableDef define_segments() {
             if (!ok)
               xsql::set_vtab_error("segments: failed to set class on segment " +
                                    idasql::format_ea_hex(s->start_ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_int_rw(
@@ -431,7 +431,7 @@ VTableDef define_segments() {
           },
           // Setter - change segment permissions
           [](size_t i, int new_perm) -> bool {
-            auto_wait();
+            idasql_auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
             if (!s) {
               xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
@@ -442,16 +442,16 @@ VTableDef define_segments() {
             if (!ok)
               xsql::set_vtab_error("segments: failed to update permissions on segment " +
                                    idasql::format_ea_hex(s->start_ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .deletable([](size_t i) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         segment_t *s = getnseg(static_cast<int>(i));
         if (!s)
           return false;
         bool ok = del_segm(s->start_ea, SEGMOD_KILL) != 0;
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
@@ -500,7 +500,7 @@ VTableDef define_segments() {
 
         const ea_t para = start >> 4;
 
-        auto_wait();
+        idasql_auto_wait();
         bool ok = add_segm(para, start, end, seg_name, seg_class,
                            ADDSEG_QUIET | ADDSEG_NOAA);
         if (ok && has_perm) {
@@ -512,7 +512,7 @@ VTableDef define_segments() {
             ok = created->update();
           }
         }
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .build();
@@ -538,7 +538,7 @@ VTableDef define_names() {
           },
           // Setter - rename the address
           [](size_t i, const char *new_name) -> bool {
-            auto_wait();
+            idasql_auto_wait();
             ea_t ea = get_nlist_ea(i);
             if (ea == BADADDR) {
               xsql::set_vtab_error("names: address not found at index " + std::to_string(i));
@@ -549,7 +549,7 @@ VTableDef define_names() {
               decompiler::invalidate_decompiler_cache(ea);
             else
               xsql::set_vtab_error("names: failed to rename " + idasql::format_ea_hex(ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_int("is_public",
@@ -561,12 +561,12 @@ VTableDef define_names() {
           [](size_t i) -> int { return is_weak_name(get_nlist_ea(i)) ? 1 : 0; })
       // DELETE via set_name(ea, "") - removes the name
       .deletable([](size_t i) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         ea_t ea = get_nlist_ea(i);
         if (ea == BADADDR)
           return false;
         bool ok = set_name(ea, "", SN_NOWARN) != 0;
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
@@ -579,11 +579,11 @@ VTableDef define_names() {
         if (!name || !name[0])
           return false;
 
-        auto_wait();
+        idasql_auto_wait();
         bool ok = set_name(ea, name, SN_CHECK) != 0;
         if (ok)
           decompiler::invalidate_decompiler_cache(ea);
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .build();
@@ -674,14 +674,14 @@ CachedTableDef<CommentRow> define_comments() {
             qstring cur;
             get_cmt(&cur, row.ea, false);
             if (requested == std::string(cur.c_str())) return true;
-            auto_wait();
+            idasql_auto_wait();
             bool ok = set_cmt(row.ea, requested.c_str(), false);
             if (ok)
               row.comment = requested;
             else
               xsql::set_vtab_error("comments: failed to set comment at " +
                                    idasql::format_ea_hex(row.ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .column_text_rw(
@@ -692,21 +692,21 @@ CachedTableDef<CommentRow> define_comments() {
             qstring cur;
             get_cmt(&cur, row.ea, true);
             if (requested == std::string(cur.c_str())) return true;
-            auto_wait();
+            idasql_auto_wait();
             bool ok = set_cmt(row.ea, requested.c_str(), true);
             if (ok)
               row.rpt_comment = requested;
             else
               xsql::set_vtab_error("comments: failed to set repeatable comment at " +
                                    idasql::format_ea_hex(row.ea));
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .deletable([](CommentRow &row) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         set_cmt(row.ea, "", false);
         set_cmt(row.ea, "", true);
-        auto_wait();
+        idasql_auto_wait();
         return true;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
@@ -715,7 +715,7 @@ CachedTableDef<CommentRow> define_comments() {
 
         ea_t ea = static_cast<ea_t>(argv[0].as_int64());
         bool did_something = false;
-        auto_wait();
+        idasql_auto_wait();
         if (argc > 1 && !argv[1].is_null()) {
           const char *cmt = argv[1].as_c_str();
           if (cmt) {
@@ -731,7 +731,7 @@ CachedTableDef<CommentRow> define_comments() {
           }
         }
 
-        auto_wait();
+        idasql_auto_wait();
         return did_something;
       })
       .build();
@@ -1470,7 +1470,7 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
           "description",
           [](const BookmarkRow &row) -> std::string { return row.desc; },
           [](BookmarkRow &row, const char *new_desc) -> bool {
-            auto_wait();
+            idasql_auto_wait();
             idaplace_t place(row.ea, 0);
             renderer_info_t rinfo;
             lochist_entry_t loc(&place, rinfo);
@@ -1478,16 +1478,16 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
                                            loc, row.index, nullptr);
             if (ok)
               row.desc = new_desc ? new_desc : "";
-            auto_wait();
+            idasql_auto_wait();
             return ok;
           })
       .deletable([](BookmarkRow &row) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         idaplace_t place(row.ea, 0);
         renderer_info_t rinfo;
         lochist_entry_t loc(&place, rinfo);
         bool ok = bookmarks_t::erase(loc, row.index, nullptr);
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
@@ -1503,7 +1503,7 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
             desc = "";
         }
 
-        auto_wait();
+        idasql_auto_wait();
 
         idaplace_t place(ea, 0);
         renderer_info_t rinfo;
@@ -1514,7 +1514,7 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
           slot = static_cast<uint32_t>(argv[0].as_int());
 
         uint32_t result = bookmarks_t::mark(loc, slot, nullptr, desc, nullptr);
-        auto_wait();
+        idasql_auto_wait();
 
         return result != BADADDR32;
       })
@@ -1997,6 +1997,64 @@ make_bytes_generator(ByteOrder order,
   return std::make_unique<BytesGenerator>(order, bounds);
 }
 
+bool byte_is_patched(ea_t ea) {
+  return get_byte(ea) != static_cast<uchar>(get_original_byte(ea));
+}
+
+// idaapi callback for visit_patched_bytes: collect patched addresses.
+int idaapi collect_patched_ea(ea_t ea, qoff64_t, uint64, uint64, void *ud) {
+  auto *vec = static_cast<std::vector<ea_t> *>(ud);
+  vec->push_back(ea);
+  return 0; // continue
+}
+
+// Generator backing `bytes WHERE is_patched = <v>`. For v == 1 it enumerates
+// only patched locations via visit_patched_bytes() (O(#patches)); for v == 0 it
+// scans mapped bytes yielding the unpatched ones; any other value yields none.
+// The query planner omits the is_patched constraint (omit=1), so this generator
+// must return exactly the matching rows.
+class IsPatchedGenerator : public xsql::Generator<ByteRow> {
+  int want_;
+  std::vector<ea_t> patched_;
+  size_t pidx_ = 0;
+  BytesGenerator scan_{ByteOrder::Asc, ByteBounds{}};
+  mutable ByteRow row_{BADADDR};
+
+public:
+  explicit IsPatchedGenerator(int want) : want_(want) {
+    if (want_ == 1) {
+      visit_patched_bytes(0, BADADDR, collect_patched_ea, &patched_);
+    }
+  }
+
+  bool next() override {
+    if (want_ == 1) {
+      while (pidx_ < patched_.size()) {
+        const ea_t ea = patched_[pidx_++];
+        if (is_mapped_byte_address(ea) && byte_is_patched(ea)) {
+          row_.ea = ea;
+          return true;
+        }
+      }
+      return false;
+    }
+    if (want_ == 0) {
+      while (scan_.next()) {
+        const ea_t ea = scan_.current().ea;
+        if (!byte_is_patched(ea)) {
+          row_.ea = ea;
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  const ByteRow &current() const override { return row_; }
+  int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
+};
+
 } // namespace
 
 GeneratorTableDef<ByteRow> define_bytes() {
@@ -2020,6 +2078,54 @@ GeneratorTableDef<ByteRow> define_bytes() {
             bool ok = patch_byte(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch byte at " +
+                                   idasql::format_ea_hex(row.ea));
+            return ok;
+          })
+      .column_int_rw(
+          "word", [](const ByteRow &row) -> int { return get_word(row.ea); },
+          [](ByteRow &row, int val) -> bool {
+            if (!is_mapped_byte_address(row.ea)) {
+              xsql::set_vtab_error("bytes: address is not mapped: " +
+                                   idasql::format_ea_hex(row.ea));
+              return false;
+            }
+            bool ok = patch_word(row.ea, static_cast<uint64>(val));
+            if (!ok)
+              xsql::set_vtab_error("bytes: failed to patch word at " +
+                                   idasql::format_ea_hex(row.ea));
+            return ok;
+          })
+      .column_int64_rw(
+          "dword",
+          [](const ByteRow &row) -> int64_t {
+            return static_cast<int64_t>(get_dword(row.ea));
+          },
+          [](ByteRow &row, int64_t val) -> bool {
+            if (!is_mapped_byte_address(row.ea)) {
+              xsql::set_vtab_error("bytes: address is not mapped: " +
+                                   idasql::format_ea_hex(row.ea));
+              return false;
+            }
+            bool ok = patch_dword(row.ea, static_cast<uint64>(val));
+            if (!ok)
+              xsql::set_vtab_error("bytes: failed to patch dword at " +
+                                   idasql::format_ea_hex(row.ea));
+            return ok;
+          })
+      .column_int64_rw(
+          "qword",
+          [](const ByteRow &row) -> int64_t {
+            return static_cast<int64_t>(get_qword(row.ea));
+          },
+          [](ByteRow &row, int64_t val) -> bool {
+            if (!is_mapped_byte_address(row.ea)) {
+              xsql::set_vtab_error("bytes: address is not mapped: " +
+                                   idasql::format_ea_hex(row.ea));
+              return false;
+            }
+            bool ok = patch_qword(row.ea, static_cast<uint64>(val));
+            if (!ok)
+              xsql::set_vtab_error("bytes: failed to patch qword at " +
                                    idasql::format_ea_hex(row.ea));
             return ok;
           })
@@ -2074,45 +2180,35 @@ GeneratorTableDef<ByteRow> define_bytes() {
           },
           10.0, 100.0)
       .order_by_consumed("ea", true)
-      .build();
-}
-
-// ============================================================================
-// PATCHED_BYTES Table - All patched locations via visit_patched_bytes()
-// ============================================================================
-
-// Callback for visit_patched_bytes (requires idaapi calling convention)
-int idaapi patched_bytes_visitor(ea_t ea, qoff64_t fpos, uint64 o, uint64 v,
-                                 void *ud) {
-  auto *vec = static_cast<std::vector<PatchedByteInfo> *>(ud);
-  vec->push_back({ea, fpos, o, v});
-  return 0; // continue
-}
-
-CachedTableDef<PatchedByteInfo> define_patched_bytes() {
-  return cached_table<PatchedByteInfo>("patched_bytes")
-      .no_shared_cache()
-      .estimate_rows([]() -> size_t { return 1024; })
-      .cache_builder([](std::vector<PatchedByteInfo> &rows) {
-        rows.clear();
-        visit_patched_bytes(0, BADADDR, patched_bytes_visitor, &rows);
+      // Fast patch enumeration: `WHERE is_patched = 1` walks the patch list via
+      // visit_patched_bytes() (O(#patches)) instead of scanning every mapped
+      // byte. Replaces the former standalone patched_bytes table.
+      .constraint_filter(
+          {xsql::required_eq("is_patched", "")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<ByteRow>> {
+            int want = 1;
+            if (!args.empty())
+              want = static_cast<int>(args.front().value.as_int64());
+            return std::make_unique<IsPatchedGenerator>(want);
+          },
+          1.0, 64.0)
+      // DELETE reverts a patch (revert_byte). Deleting an unpatched byte is a
+      // harmless no-op. `DELETE FROM bytes WHERE is_patched = 1` reverts all.
+      .deletable([](ByteRow &row) -> bool {
+        if (!is_mapped_byte_address(row.ea)) {
+          xsql::set_vtab_error("bytes: address is not mapped: " +
+                               idasql::format_ea_hex(row.ea));
+          return false;
+        }
+        if (!byte_is_patched(row.ea))
+          return true; // nothing to revert
+        bool ok = revert_byte(row.ea);
+        if (!ok)
+          xsql::set_vtab_error("bytes: failed to revert byte at " +
+                               idasql::format_ea_hex(row.ea));
+        return ok;
       })
-      .column_int64("ea",
-                    [](const PatchedByteInfo &row) -> int64_t {
-                      return static_cast<int64_t>(row.ea);
-                    })
-      .column_int("original_value",
-                  [](const PatchedByteInfo &row) -> int {
-                    return static_cast<int>(row.original_value);
-                  })
-      .column_int("patched_value",
-                  [](const PatchedByteInfo &row) -> int {
-                    return static_cast<int>(row.patched_value);
-                  })
-      .column_int64("fpos",
-                    [](const PatchedByteInfo &row) -> int64_t {
-                      return static_cast<int64_t>(row.fpos);
-                    })
       .build();
 }
 
@@ -2389,7 +2485,7 @@ bool operand_numeric_value(ea_t ea, int opnum, uint64 &out_value,
 
 ssize_t find_enum_member_by_name(const tinfo_t &enum_tif, edm_t *out,
                                  const char *name) {
-#if IDA_SDK_VERSION >= 920
+#if IDASQL_HAS_GET_EDM
   return enum_tif.get_edm(out, name);
 #else
   return enum_tif.find_edm(out, name);
@@ -2399,7 +2495,7 @@ ssize_t find_enum_member_by_name(const tinfo_t &enum_tif, edm_t *out,
 ssize_t find_enum_member_by_value(const tinfo_t &enum_tif, edm_t *out,
                                   uint64 value, bmask64_t bmask,
                                   uchar serial) {
-#if IDA_SDK_VERSION >= 920
+#if IDASQL_HAS_GET_EDM
   return enum_tif.get_edm_by_value(out, value, bmask, serial);
 #else
   return enum_tif.find_edm(out, value, bmask, serial);
@@ -2459,7 +2555,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
   }
 
   bool ok = false;
-  auto_wait();
+  idasql_auto_wait();
 
   switch (req.kind) {
   case OperandApplyKind::Clear:
@@ -2476,7 +2572,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
     insn_t insn;
     op_t op;
     if (!decode_operand(ea, opnum, insn, op, out_error)) {
-      auto_wait();
+      idasql_auto_wait();
       return false;
     }
 
@@ -2486,7 +2582,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
         !enum_tif.is_enum()) {
       if (out_error)
         *out_error = "enum type not found";
-      auto_wait();
+      idasql_auto_wait();
       return false;
     }
 
@@ -2498,7 +2594,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
         if (out_error)
           *out_error =
               "enum member apply requires numeric operand: " + value_err;
-        auto_wait();
+        idasql_auto_wait();
         return false;
       }
 
@@ -2507,13 +2603,13 @@ bool apply_operand_representation(ea_t ea, int opnum,
                                    req.enum_member_name.c_str()) < 0) {
         if (out_error)
           *out_error = "enum member not found";
-        auto_wait();
+        idasql_auto_wait();
         return false;
       }
       if (member.value != operand_value) {
         if (out_error)
           *out_error = "enum member value does not match operand value";
-        auto_wait();
+        idasql_auto_wait();
         return false;
       }
 
@@ -2522,7 +2618,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
                                       &serial_err)) {
         if (out_error)
           *out_error = serial_err;
-        auto_wait();
+        idasql_auto_wait();
         return false;
       }
     }
@@ -2537,7 +2633,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
     insn_t insn;
     op_t op;
     if (!decode_operand(ea, opnum, insn, op, out_error)) {
-      auto_wait();
+      idasql_auto_wait();
       return false;
     }
 
@@ -2549,7 +2645,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
       if (!resolve_named_type_tid(name, tid, &tif) || !tif.is_udt()) {
         if (out_error)
           *out_error = "stroff type path contains unknown or non-udt type";
-        auto_wait();
+        idasql_auto_wait();
         return false;
       }
       path.push_back(tid);
@@ -2558,7 +2654,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
     if (path.empty()) {
       if (out_error)
         *out_error = "stroff type path is empty";
-      auto_wait();
+      idasql_auto_wait();
       return false;
     }
     ok = op_stroff(insn, opnum, path.data(), static_cast<int>(path.size()),
@@ -2576,7 +2672,7 @@ bool apply_operand_representation(ea_t ea, int opnum,
   if (ok) {
     decompiler::invalidate_decompiler_cache(ea);
   }
-  auto_wait();
+  idasql_auto_wait();
   return ok;
 }
 
@@ -3149,10 +3245,10 @@ CachedTableDef<InstructionRow> define_instructions() {
 
   builder
       .deletable([](InstructionRow &row) -> bool {
-        auto_wait();
+        idasql_auto_wait();
         asize_t sz = get_item_size(row.ea);
         bool ok = del_items(row.ea, DELIT_SIMPLE, sz);
-        auto_wait();
+        idasql_auto_wait();
         return ok;
       })
       .filter_eq(
@@ -3704,7 +3800,7 @@ TableRegistry::TableRegistry()
     : funcs(define_funcs()), segments(define_segments()), names(define_names()),
       entries(define_entries()), comments(define_comments()),
       bookmarks(define_bookmarks()), heads(define_heads()),
-      bytes(define_bytes()), patched_bytes(define_patched_bytes()),
+      bytes(define_bytes()),
       instructions(define_instructions()),
       instruction_operands(define_instruction_operands()), xrefs(define_xrefs()),
       data_refs(define_data_refs()), blocks(define_blocks()),
@@ -3739,7 +3835,6 @@ void TableRegistry::register_all(xsql::Database &db) {
   register_cached_table(db, "bookmarks", &bookmarks);
   register_generator_table(db, "heads", &heads);
   register_generator_table(db, "bytes", &bytes);
-  register_cached_table(db, "patched_bytes", &patched_bytes);
   register_cached_table(db, "instructions", &instructions);
   register_cached_table(db, "instruction_operands", &instruction_operands);
   register_cached_table(db, "xrefs", &xrefs);

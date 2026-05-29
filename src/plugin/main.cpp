@@ -385,7 +385,10 @@ struct idasql_plugmod_t : public plugmod_t
 
 static plugmod_t* idaapi init()
 {
-    // Skip loading when running under idalib (e.g., idasql CLI)
+    // Skip loading when running under idalib (e.g., idasql CLI).
+    // is_ida_library() gained default arguments in SDK 9.2. On older SDKs
+    // all three args are required. See lib/src/ida_compat.hpp for the rest
+    // of the cross-version surface (this TU doesn't pull that header).
 #if IDA_SDK_VERSION >= 920
     if (is_ida_library()) {
 #else

@@ -11,6 +11,7 @@
 
 #include <xsql/json.hpp>
 
+#include <cctype>
 #include <sstream>
 #include <unordered_map>
 
@@ -197,11 +198,6 @@ bool init_hexrays() {
     if (!initialized) {
         initialized = true;
         hexrays_available() = init_hexrays_plugin();
-        if (hexrays_available()) {
-            // Hex-Rays initialization may trigger additional auto-analysis work.
-            // Ensure analysis is complete before running decompiler-backed queries.
-            auto_wait();
-        }
     }
     return hexrays_available();
 }
@@ -212,6 +208,51 @@ void invalidate_decompiler_cache(ea_t ea) {
     if (f) {
         mark_cfunc_dirty(f->start_ea, false);
     }
+}
+
+bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif) {
+    out_tif.clear();
+    if (decl_text == nullptr || *decl_text == '\0') {
+        return false;
+    }
+
+    std::string decl = decl_text;
+    while (!decl.empty() && std::isspace(static_cast<unsigned char>(decl.back()))) {
+        decl.pop_back();
+    }
+    if (decl.empty()) {
+        return false;
+    }
+    if (decl.back() != ';') {
+        decl.push_back(';');
+    }
+
+    qstring parsed_name;
+    bool ok = parse_decl(&out_tif, &parsed_name, nullptr, decl.c_str(), PT_SIL);
+    if (!ok) {
+        const size_t open_paren = decl.find('(');
+        const bool looks_like_funcptr = decl.find("(*") != std::string::npos
+            || decl.find("(__") != std::string::npos;
+        if (open_paren != std::string::npos && !looks_like_funcptr) {
+            std::string named_decl = decl;
+            named_decl.insert(open_paren, " __idasql_callee");
+            ok = parse_decl(&out_tif, &parsed_name, nullptr, named_decl.c_str(), PT_SIL);
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    if (out_tif.is_funcptr()) {
+        out_tif = out_tif.get_pointed_object();
+    } else if (!out_tif.is_func() && out_tif.is_ptr()) {
+        tinfo_t pointed = out_tif.get_pointed_object();
+        if (pointed.is_func()) {
+            out_tif = pointed;
+        }
+    }
+
+    return out_tif.is_func();
 }
 
 bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif) {
@@ -232,6 +273,26 @@ bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif) {
         invalidate_decompiler_cache(call_ea);
     }
     return ok;
+}
+
+bool clear_callee_tinfo_at(ea_t call_ea) {
+    if (!hexrays_available()) return false;
+    if (call_ea == BADADDR || call_ea == 0) return false;
+    func_t* f = get_func(call_ea);
+    if (f == nullptr) return false;
+
+    del_op_tinfo(call_ea, 0);
+
+    udcall_map_t udcalls;
+    restore_user_defined_calls(&udcalls, f->start_ea);
+    auto it = udcalls.find(call_ea);
+    if (it != udcalls.end()) {
+        udcalls.erase(it);
+        save_user_defined_calls(f->start_ea, udcalls);
+    }
+
+    invalidate_decompiler_cache(call_ea);
+    return true;
 }
 
 bool get_callee_tinfo_at(ea_t call_ea, tinfo_t& out_tif) {
@@ -585,10 +646,8 @@ void collect_all_lvars(std::vector<LvarInfo>& vars) {
 // ============================================================================
 
 static citem_t* current_parent_item(ctree_parentee_t* visitor) {
-    if (visitor == nullptr) {
-        return nullptr;
-    }
-#if IDA_SDK_VERSION >= 920
+    if (visitor == nullptr) return nullptr;
+#if IDASQL_HAS_PARENT_ITEM
     return visitor->parent_item();
 #else
     return visitor->parents.empty() ? nullptr : visitor->parents.back();

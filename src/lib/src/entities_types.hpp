@@ -70,6 +70,14 @@ struct TypeEntry {
 void collect_types(std::vector<TypeEntry>& rows);
 
 // ============================================================================
+// Applied Type Bindings
+// ============================================================================
+
+struct AppliedTypeEntry {
+    ea_t ea = BADADDR;
+};
+
+// ============================================================================
 // Member Entry Cache
 // ============================================================================
 
@@ -279,6 +287,7 @@ public:
 // ============================================================================
 
 CachedTableDef<TypeEntry> define_types();
+GeneratorTableDef<AppliedTypeEntry> define_applied_types();
 CachedTableDef<MemberEntry> define_types_members();
 CachedTableDef<EnumValueEntry> define_types_enum_values();
 CachedTableDef<FuncArgEntry> define_types_func_args();
@@ -289,6 +298,7 @@ CachedTableDef<FuncArgEntry> define_types_func_args();
 
 struct TypesRegistry {
     CachedTableDef<TypeEntry> types;
+    GeneratorTableDef<AppliedTypeEntry> applied_types;
     CachedTableDef<MemberEntry> types_members;
     CachedTableDef<EnumValueEntry> types_enum_values;
     CachedTableDef<FuncArgEntry> types_func_args;

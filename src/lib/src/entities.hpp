@@ -112,13 +112,6 @@ struct ByteRow {
   ea_t ea = BADADDR;
 };
 
-struct PatchedByteInfo {
-  ea_t ea;
-  qoff64_t fpos;
-  uint64 original_value;
-  uint64 patched_value;
-};
-
 struct InstructionRow {
   ea_t ea = BADADDR;
 };
@@ -259,9 +252,6 @@ bool apply_operand_representation(ea_t ea, int opnum,
                                   std::string *out_error = nullptr);
 const char *operand_class_name(optype_t type);
 
-int idaapi patched_bytes_visitor(ea_t ea, qoff64_t fpos, uint64 o, uint64 v,
-                                 void *ud);
-
 // ============================================================================
 // Table definition declarations
 // ============================================================================
@@ -274,7 +264,6 @@ CachedTableDef<CommentRow> define_comments();
 CachedTableDef<BookmarkRow> define_bookmarks();
 GeneratorTableDef<HeadRow> define_heads();
 GeneratorTableDef<ByteRow> define_bytes();
-CachedTableDef<PatchedByteInfo> define_patched_bytes();
 CachedTableDef<InstructionRow> define_instructions();
 CachedTableDef<InstructionOperandRow> define_instruction_operands();
 CachedTableDef<XrefInfo> define_xrefs();
@@ -461,7 +450,6 @@ struct TableRegistry {
   CachedTableDef<BookmarkRow> bookmarks;
   GeneratorTableDef<HeadRow> heads;
   GeneratorTableDef<ByteRow> bytes;
-  CachedTableDef<PatchedByteInfo> patched_bytes;
   CachedTableDef<InstructionRow> instructions;
   CachedTableDef<InstructionOperandRow> instruction_operands;
 

@@ -176,7 +176,7 @@ claude /install-plugin https://github.com/allthingsida/idasql-skills
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.15 - SQL interface to IDA databases
+idasql v0.0.16 - SQL interface to IDA databases
 
 Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]
 
@@ -265,8 +265,7 @@ Notes:
 | Table | Description |
 |-------|-------------|
 | `strings` | Strings - address, content, length, type |
-| `bytes` | Raw bytes - address, value, original value, size, type, patch detection |
-| `patched_bytes` | Byte patches - original vs patched values, file position |
+| `bytes` | Raw bytes - `value`/`word`/`dword`/`qword` writable (UPDATE patches, DELETE reverts), `original_value`, `is_patched` (fast patch enumeration via `WHERE is_patched = 1`) |
 
 ### Decompiler
 

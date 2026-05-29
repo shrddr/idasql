@@ -154,11 +154,17 @@ inline CommandResult handle_command(
 
             if (callbacks.mcp_start) {
                 output = callbacks.mcp_start(port, bind_addr);
-                // Only copy to clipboard on fresh start (multi-line output with URL)
-                auto nl = output.find('\n');
-                if (nl != std::string::npos) {
-                    const std::string clipboard_text = output.substr(0, nl);
-                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(clipboard_text);
+                // Only copy to clipboard on fresh start (output reports a port).
+                // Copy the MCP server JSON config (paste-ready into a client
+                // such as Claude Desktop), not the human-readable status line.
+                int started_port = 0;
+                std::string started_host;
+                if (xsql::thinclient::extract_mcp_start_endpoint(
+                        output, started_host, started_port)) {
+                    const std::string payload =
+                        xsql::thinclient::build_mcp_clipboard_payload(
+                            "idasql", started_host, started_port);
+                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(payload);
                 }
             } else {
                 output = "MCP server not available";

@@ -37,7 +37,9 @@ predicates, compare address columns to integer EAs such as `address = 0x401000`.
 Examples:
 ```sql
 SELECT decompile('DriverEntry');
-SELECT set_type('DriverEntry', 'NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);');
+UPDATE applied_types
+SET decl = 'NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);'
+WHERE address = 'DriverEntry';
 SELECT (SELECT comment FROM comments WHERE address = 0x401000 LIMIT 1);
 ```
 
@@ -700,7 +702,7 @@ ORDER BY i.address, o.opnum;
 **Performance:** `WHERE address = X` decodes one instruction; `WHERE func_addr = X` uses O(function_size) iteration. Without one of these constraints, it scans the entire database - SLOW.
 
 #### disasm_calls
-All call instructions with resolved targets.
+All call instructions with resolved targets and optional call-site prototype overrides.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -708,11 +710,18 @@ All call instructions with resolved targets.
 | `ea` | INT | Call instruction address |
 | `callee_addr` | INT | Target address (0 if unknown) |
 | `callee_name` | TEXT | Target name |
+| `callee_type` | TEXT | RW nullable call-site prototype; `UPDATE` applies/replaces, `NULL` or empty clears |
 
 ```sql
 -- Functions that call malloc
 SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as caller
 FROM disasm_calls WHERE callee_name LIKE '%malloc%';
+
+-- Apply or clear an indirect/direct call-site prototype
+UPDATE disasm_calls
+SET callee_type = 'int (__fastcall *)(const char *path)'
+WHERE ea = 0x401234;
+UPDATE disasm_calls SET callee_type = NULL WHERE ea = 0x401234;
 ```
 
 ### Database Modification
@@ -723,17 +732,18 @@ Quick capability matrix:
 | Table | INSERT | UPDATE columns | DELETE |
 |-------|--------|---------------|--------|
 | `breakpoints` | Yes | `enabled`, `type`, `size`, `flags`, `pass_count`, `condition`, `group` | Yes |
-| `funcs` | Yes | `name`, `flags` | Yes |
+| `funcs` | Yes | `name`, `prototype`, `comment`, `rpt_comment`, `flags` | Yes |
 | `names` | Yes | `name` | Yes |
 | `comments` | Yes | `comment`, `rpt_comment` | Yes |
 | `bookmarks` | Yes | `description` | Yes |
 | `segments` | — | `name`, `class`, `perm` | Yes |
 | `instructions` | — | `operand0_format_spec` .. `operand7_format_spec` | Yes |
-| `bytes` | — | `value` | — |
-| `patched_bytes` | — | — | — |
+| `bytes` | — | `value`, `word`, `dword`, `qword` | Yes (revert patch) |
 | `types` | Yes | Yes | Yes |
 | `types_members` | Yes | Yes | Yes |
 | `types_enum_values` | Yes | Yes | Yes |
+| `applied_types` | Yes | `decl` | Yes |
+| `disasm_calls` | — | `callee_type` | — |
 | `ctree_lvars` | — | `name`, `type`, `comment` | — |
 | `netnode_kv` | Yes | `value` | Yes |
 
@@ -745,8 +755,6 @@ Write support is covered by integration/e2e tests in:
 - `tests/idasql/names_table_test.cpp`
 - `tests/idasql/bytes_table_test.cpp`
 - `tests/idasql/netnode_kv_table_test.cpp`
-- `tests/idasql/patch_functions_test.cpp`
-- `tests/idasql/patched_bytes_table_test.cpp`
 
 Type/decompiler write examples:
 ```sql
@@ -1073,6 +1081,38 @@ SELECT type_name, arg_type FROM types_func_args
 WHERE is_ptr = 0 AND is_ptr_resolved = 1;
 ```
 
+#### applied_types
+Applied C declarations at mapped addresses. Use this to read, apply, replace, or clear function/data type information.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `address` | INT | Mapped EA |
+| `decl` | TEXT | RW nullable C declaration at the address |
+| `ordinal` | INT | Local type ordinal when the applied type is ordinal-backed |
+| `type_name` | TEXT | Local type name when available |
+
+```sql
+-- Apply or replace a declaration; address can be an EA, numeric string, or symbol name
+INSERT INTO applied_types(address, decl)
+VALUES (0x401000, 'int __fastcall sub_401000(void);');
+
+UPDATE applied_types
+SET decl = 'int __fastcall dispatch(command_t *cmd);'
+WHERE address = 'dispatch';
+
+-- Clear the declaration/type at the address
+DELETE FROM applied_types WHERE address = 0x401000;
+UPDATE applied_types SET decl = NULL WHERE address = 0x401000;
+
+-- Join ordinal-backed applied types back to local types
+SELECT a.address, a.type_name, t.kind
+FROM applied_types a
+JOIN types t ON t.ordinal = a.ordinal
+WHERE a.ordinal IS NOT NULL;
+```
+
+Point lookup is write-friendly: `WHERE address = X` returns one mapped row even when no type is currently applied, with `decl`, `ordinal`, and `type_name` as `NULL`. Range scans return only addresses that currently have applied type information.
+
 ### Type Views
 
 Convenience views for filtering types:
@@ -1094,10 +1134,16 @@ mapped byte address; IDA item metadata such as size/type belongs to `heads`.
 | Column | Type | RW | Description |
 |--------|------|----|-------------|
 | `ea` | INT | R | Byte address |
-| `value` | INT | RW | Current byte value (UPDATE patches byte) |
+| `value` | INT | RW | Current byte value (UPDATE patches 1 byte) |
+| `word` | INT | RW | 2-byte LE value (UPDATE patches 2 bytes) |
+| `dword` | INT | RW | 4-byte LE value (UPDATE patches 4 bytes) |
+| `qword` | INT | RW | 8-byte LE value (UPDATE patches 8 bytes) |
 | `original_value` | INT | R | Original byte value before patch |
 | `is_patched` | INT | R | 1 if byte differs from original |
 | `fpos` | INT | R | Physical/input file offset (NULL when unavailable) |
+
+Patch via UPDATE (single or width columns), enumerate patches via
+`WHERE is_patched = 1` (fast — backed by IDA's patch list), revert via DELETE.
 
 ```sql
 -- Read one address
@@ -1115,32 +1161,22 @@ SELECT address, size, type, flags, disasm
 FROM heads
 WHERE address = 0x401000;
 
--- Patch via table update
+-- Patch via table update (single byte, or width columns word/dword/qword)
 UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
+UPDATE bytes SET dword = 0x90909090 WHERE ea = 0x401000;  -- little-endian
 
--- Inspect patch inventory
-SELECT * FROM patched_bytes LIMIT 20;
+-- Inspect patch inventory (fast: backed by IDA's patch list)
+SELECT printf('0x%X', ea) AS ea,
+       printf('0x%02X', original_value) AS old,
+       printf('0x%02X', value) AS new
+FROM bytes WHERE is_patched = 1 ORDER BY ea;
+
+-- Revert: one byte, a range, or every patch
+DELETE FROM bytes WHERE ea = 0x401000;
+DELETE FROM bytes WHERE is_patched = 1;
 
 -- Persist once done
 SELECT save_database();
-```
-
-#### patched_bytes
-All patched locations tracked by IDA.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ea` | INT | Patched address |
-| `original_value` | INT | Original byte value |
-| `patched_value` | INT | Current patched value |
-| `fpos` | INT | File offset when available |
-
-```sql
-SELECT printf('0x%X', ea) AS ea,
-       printf('0x%02X', original_value) AS old,
-       printf('0x%02X', patched_value) AS new
-FROM patched_bytes
-ORDER BY ea;
 ```
 
 #### bookmarks
@@ -1382,29 +1418,35 @@ WHERE func_addr = 0x401000 AND mnemonic = 'call';
 ```
 
 ### Byte Access and Patching
-| Function | Description |
-|----------|-------------|
-| `bytes(addr, n)` | Read `n` raw bytes as hex string |
-| `bytes_raw(addr, n)` | Read `n` bytes as BLOB |
-| `patch_byte(addr, val)` | Patch one byte at `addr` (returns 1/0) |
-| `patch_word(addr, val)` | Patch 2 bytes at `addr` (returns 1/0) |
-| `patch_dword(addr, val)` | Patch 4 bytes at `addr` (returns 1/0) |
-| `patch_qword(addr, val)` | Patch 8 bytes at `addr` (returns 1/0) |
-| `revert_byte(addr)` | Revert one patched byte to original |
-| `get_original_byte(addr)` | Read original (pre-patch) byte |
+Reads use the `bytes(addr, n)` / `bytes_raw(addr, n)` scalars; **all patching is
+done through the writable `bytes` table** (UPDATE to patch, DELETE to revert).
+There are no `patch_*` / `revert_byte` / `get_original_byte` scalar functions —
+use the table columns instead.
+
+| Operation | SQL |
+|-----------|-----|
+| Read hex | `SELECT bytes(addr, n)` |
+| Read BLOB | `SELECT bytes_raw(addr, n)` |
+| Patch 1 byte | `UPDATE bytes SET value = v WHERE ea = addr` |
+| Patch 2/4/8 bytes (LE) | `UPDATE bytes SET word\|dword\|qword = v WHERE ea = addr` |
+| Original byte | `SELECT original_value FROM bytes WHERE ea = addr` |
+| List patches (fast) | `SELECT ea FROM bytes WHERE is_patched = 1` |
+| Revert one / all | `DELETE FROM bytes WHERE ea = addr` / `WHERE is_patched = 1` |
 
 ```sql
 -- Read bytes
 SELECT bytes(0x401000, 16);
 
--- Patch one byte (example: NOP)
-SELECT patch_byte(0x401000, 0x90) AS ok;
+-- Patch one byte (example: NOP) and a 4-byte little-endian value
+UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
+UPDATE bytes SET dword = 0x90909090 WHERE ea = 0x401000;
 
 -- Verify current vs original
-SELECT bytes(0x401000, 1) AS current, get_original_byte(0x401000) AS original;
+SELECT value AS current, original_value AS original
+FROM bytes WHERE ea = 0x401000;
 
 -- Revert patch
-SELECT revert_byte(0x401000) AS reverted;
+DELETE FROM bytes WHERE ea = 0x401000;
 
 -- Persist patches explicitly
 SELECT save_database();
@@ -1579,16 +1621,15 @@ DELETE FROM comments WHERE address = 0x401000;
 Note: for both `names` and `comments`, `INSERT` at an EA that already has a value **replaces** it (IDA permits one name/one comment-slot per address); `UPDATE` is equivalent. For `names`, `SN_CHECK` may auto-disambiguate globally conflicting names (`foo` → `foo_0`) — read back the row to see what was stored.
 
 ### Modification
-| Function | Description |
-|----------|-------------|
-| `type_at(addr)` | Read type declaration applied at address |
-| `set_type(addr, decl)` | Apply C declaration/type at address (empty decl clears type; `addr` may be EA, numeric string, or symbol name) |
+| Surface | Description |
+|---------|-------------|
+| `applied_types(address, decl, ordinal, type_name)` | Read, apply, replace, or clear C declarations at addresses. `address` accepts EA integers, numeric strings, and symbol names for equality writes/filters. |
 | `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types |
 
 Preferred SQL write surface for function metadata:
 - `UPDATE funcs SET name = '...', prototype = '...' WHERE address = ...`
 - `INSERT INTO names(address, name) VALUES (..., '...')` or `UPDATE names SET name = '...' WHERE address = ...`
-- `prototype` maps to `type_at/set_type` behavior and invalidates decompiler cache.
+- `prototype` maps to `applied_types` behavior and invalidates decompiler cache.
 
 ### Python Execution
 | Function | Description |

@@ -3,6 +3,7 @@
 add_library(idasql STATIC
     src/database.cpp
     src/session.cpp
+    src/address_resolution.cpp
     src/entities.cpp
     src/entities_ext.cpp
     src/entities_dbg.cpp
@@ -13,10 +14,10 @@ add_library(idasql STATIC
     src/disassembly.cpp
     src/search_bytes.cpp
     src/idapython_exec.cpp
-    src/ida90_compat.cpp
     src/metadata.cpp
     src/metadata_welcome.cpp
     src/ui_context_provider.cpp
+    src/ida_compat.cpp
 )
 
 target_include_directories(idasql

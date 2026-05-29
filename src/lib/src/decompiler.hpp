@@ -62,8 +62,14 @@ void invalidate_decompiler_cache(ea_t ea);
 // Apply an explicit callee type to one call site.
 bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif);
 
+// Clear an explicit callee type at one call site.
+bool clear_callee_tinfo_at(ea_t call_ea);
+
 // Read explicit operand/call-site type info from a call instruction.
 bool get_callee_tinfo_at(ea_t call_ea, tinfo_t& out_tif);
+
+// Parse a callee declaration into a function tinfo.
+bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif);
 
 // Read stored argument-loader addresses for a call site.
 bool get_call_arg_addrs(ea_t call_ea, eavec_t& out_addrs);

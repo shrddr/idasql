@@ -24,7 +24,7 @@ bool Session::open(const char* idb_path) {
     error_.clear();
 
     // Open the database
-#if IDA_SDK_VERSION >= 920
+#if IDASQL_HAS_OPEN_DATABASE_3ARG
     int rc = open_database(idb_path, true, nullptr);
 #else
     int rc = open_database(idb_path, true);
@@ -35,8 +35,8 @@ bool Session::open(const char* idb_path) {
     }
     ida_opened_ = true;
 
-    // Wait for auto-analysis
-    auto_wait();
+    // Wait for auto-analysis (no-op if the user disabled AA — see ida_compat.hpp)
+    idasql_auto_wait();
 
     // For new analysis (exe/dll/etc), build strings after auto-analysis completes
     // For existing databases (i64/idb), strings are already saved

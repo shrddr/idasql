@@ -21,12 +21,12 @@
 #include <unordered_set>
 #include <cctype>
 #include <cstring>
-#include <cerrno>
 #include <cstdlib>
 #include <limits>
 
 #include "ida_headers.hpp"
 #include <diskio.hpp>
+#include "address_resolution.hpp"
 #include "decompiler.hpp"
 #include "entities.hpp"
 #include "idapython_exec.hpp"
@@ -34,15 +34,6 @@
 
 namespace idasql {
 namespace functions {
-
-static bool resolve_address_arg(
-        xsql::FunctionContext& ctx,
-        xsql::FunctionArg* argv,
-        int arg_index,
-        const char* arg_name,
-        ea_t& out_ea);
-
-static bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif);
 
 // ============================================================================
 // Disassembly Functions
@@ -332,7 +323,7 @@ static void sql_load_file_bytes(xsql::FunctionContext& ctx, int argc, xsql::Func
         return;
     }
 
-    auto_wait();
+    idasql_auto_wait();
     const int ok = file2base(
         li,
         static_cast<qoff64_t>(file_offset_raw),
@@ -340,23 +331,8 @@ static void sql_load_file_bytes(xsql::FunctionContext& ctx, int argc, xsql::Func
         end_ea,
         patchable);
     close_linput(li);
-    auto_wait();
+    idasql_auto_wait();
 
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// patch_byte(ea, value) - Patch a single byte (preserves original)
-static void sql_patch_byte(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("patch_byte requires 2 arguments (address, value)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    uint64 val = static_cast<uint64>(argv[1].as_int64());
-    bool ok = patch_byte(ea, val);
     ctx.result_int(ok ? 1 : 0);
 }
 
@@ -418,13 +394,13 @@ static void sql_make_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     }
 
     if (is_code(get_flags(ea))) {
-        auto_wait();
+        idasql_auto_wait();
         ctx.result_int(1);
         return;
     }
 
     const int len = create_instruction_at(ea);
-    auto_wait();
+    idasql_auto_wait();
     ctx.result_int(len > 0 ? 1 : 0);
 }
 
@@ -449,172 +425,8 @@ static void sql_make_code_range(xsql::FunctionContext& ctx, int argc, xsql::Func
     }
 
     const int created = make_code_range_impl(start, end);
-    auto_wait();
+    idasql_auto_wait();
     ctx.result_int(created);
-}
-
-// patch_word(ea, value) - Patch a word (2 bytes, preserves original)
-static void sql_patch_word(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("patch_word requires 2 arguments (address, value)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    uint64 val = static_cast<uint64>(argv[1].as_int64());
-    bool ok = patch_word(ea, val);
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// patch_dword(ea, value) - Patch a dword (4 bytes, preserves original)
-static void sql_patch_dword(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("patch_dword requires 2 arguments (address, value)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    uint64 val = static_cast<uint64>(argv[1].as_int64());
-    bool ok = patch_dword(ea, val);
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// patch_qword(ea, value) - Patch a qword (8 bytes, preserves original)
-static void sql_patch_qword(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("patch_qword requires 2 arguments (address, value)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    uint64 val = static_cast<uint64>(argv[1].as_int64());
-    bool ok = patch_qword(ea, val);
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// revert_byte(ea) - Revert a patched byte to original
-static void sql_revert_byte(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1) {
-        ctx.result_error("revert_byte requires 1 argument (address)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    bool ok = revert_byte(ea);
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// get_original_byte(ea) - Get the original byte value before patching
-static void sql_get_original_byte(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1) {
-        ctx.result_error("get_original_byte requires 1 argument (address)");
-        return;
-    }
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    ctx.result_int(static_cast<int>(get_original_byte(ea)));
-}
-
-// type_at(address) - Get type declaration at address
-static void sql_type_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1) {
-        ctx.result_error("type_at requires 1 argument (address)");
-        return;
-    }
-
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    qstring out;
-    if (print_type(&out, ea, PRTYPE_1LINE | PRTYPE_SEMI)) {
-        ctx.result_text(out.c_str());
-        return;
-    }
-    ctx.result_null();
-}
-
-static bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif) {
-    out_tif.clear();
-    if (decl_text == nullptr || *decl_text == '\0') {
-        return false;
-    }
-
-    std::string decl = decl_text;
-    while (!decl.empty() && std::isspace(static_cast<unsigned char>(decl.back()))) {
-        decl.pop_back();
-    }
-    if (decl.empty()) {
-        return false;
-    }
-    if (decl.back() != ';') {
-        decl.push_back(';');
-    }
-
-    qstring parsed_name;
-    bool ok = parse_decl(&out_tif, &parsed_name, nullptr, decl.c_str(), PT_SIL);
-    if (!ok) {
-        const size_t open_paren = decl.find('(');
-        const bool looks_like_funcptr = decl.find("(*") != std::string::npos
-            || decl.find("(__") != std::string::npos;
-        if (open_paren != std::string::npos && !looks_like_funcptr) {
-            std::string named_decl = decl;
-            named_decl.insert(open_paren, " __idasql_callee");
-            ok = parse_decl(&out_tif, &parsed_name, nullptr, named_decl.c_str(), PT_SIL);
-        }
-    }
-    if (!ok) {
-        return false;
-    }
-
-    if (out_tif.is_funcptr()) {
-        out_tif = out_tif.get_pointed_object();
-    } else if (!out_tif.is_func() && out_tif.is_ptr()) {
-        tinfo_t pointed = out_tif.get_pointed_object();
-        if (pointed.is_func()) {
-            out_tif = pointed;
-        }
-    }
-
-    return out_tif.is_func();
-}
-
-// set_type(address, decl) - Apply C declaration/type at address
-// Returns: 1 on success, 0 on parse/apply failure
-static void sql_set_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("set_type requires 2 arguments (address, declaration)");
-        return;
-    }
-
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    const char* decl = argv[1].as_c_str();
-    if (decl == nullptr || *decl == '\0') {
-        // Empty declaration clears user-provided type.
-        del_tinfo(ea);
-        decompiler::invalidate_decompiler_cache(ea);
-        ctx.result_int(1);
-        return;
-    }
-
-    bool ok = apply_cdecl(nullptr, ea, decl, 0);
-    if (ok) {
-        decompiler::invalidate_decompiler_cache(ea);
-    }
-    ctx.result_int(ok ? 1 : 0);
 }
 
 // parse_decls(text) - Import C declarations into local types
@@ -634,69 +446,6 @@ static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::Function
     // Allow redeclarations while keeping parser behavior deterministic.
     const int errors = parse_decls(nullptr, decls, nullptr, HTI_DCL | HTI_HIGH | HTI_SEMICOLON);
     ctx.result_int(errors == 0 ? 1 : 0);
-}
-
-// apply_callee_type(call_ea, decl) - Apply an explicit callee prototype at one call site
-// Returns: 1 on success, 0 on parse/apply failure
-static void sql_apply_callee_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("apply_callee_type requires 2 arguments (call_ea, declaration)");
-        return;
-    }
-    if (!decompiler::hexrays_available()) {
-        ctx.result_error("Hex-Rays not available");
-        return;
-    }
-
-    ea_t call_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
-        return;
-    }
-
-    const char* decl = argv[1].as_c_str();
-    if (decl == nullptr || *decl == '\0') {
-        ctx.result_error("apply_callee_type requires a non-empty declaration");
-        return;
-    }
-
-    tinfo_t tif;
-    if (!parse_callee_decl(decl, tif)) {
-        ctx.result_int(0);
-        return;
-    }
-
-    const bool ok = decompiler::apply_callee_tinfo_at(call_ea, tif);
-    ctx.result_int(ok ? 1 : 0);
-}
-
-// callee_type_at(call_ea) - Get the explicit call-site type, if any
-static void sql_callee_type_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1) {
-        ctx.result_error("callee_type_at requires 1 argument (call_ea)");
-        return;
-    }
-    if (!decompiler::hexrays_available()) {
-        ctx.result_error("Hex-Rays not available");
-        return;
-    }
-
-    ea_t call_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
-        return;
-    }
-
-    tinfo_t tif;
-    if (!decompiler::get_callee_tinfo_at(call_ea, tif)) {
-        ctx.result_null();
-        return;
-    }
-
-    qstring out;
-    if (!tif.print(&out, nullptr, PRTYPE_1LINE | PRTYPE_SEMI)) {
-        ctx.result_null();
-        return;
-    }
-    ctx.result_text(out.c_str());
 }
 
 // call_arg_addrs(call_ea) - Get persisted argument-loader addresses for a typed call site
@@ -1179,90 +928,6 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
 
 // trim_copy is now in <idasql/string_utils.hpp>
 using idasql::trim_copy;
-
-static bool parse_numeric_ea_text(const std::string& text, ea_t& out_ea) {
-    const std::string token = trim_copy(text);
-    if (token.empty()) {
-        return false;
-    }
-
-    errno = 0;
-    char* end_ptr = nullptr;
-    const unsigned long long value = strtoull(token.c_str(), &end_ptr, 0);
-    if (errno == ERANGE || end_ptr == token.c_str() || end_ptr == nullptr || *end_ptr != '\0') {
-        return false;
-    }
-    const unsigned long long max_ea = static_cast<unsigned long long>((std::numeric_limits<ea_t>::max)());
-    if (value > max_ea) {
-        return false;
-    }
-
-    out_ea = static_cast<ea_t>(value);
-    return true;
-}
-
-static bool resolve_address_arg(
-        xsql::FunctionContext& ctx,
-        xsql::FunctionArg* argv,
-        int arg_index,
-        const char* arg_name,
-        ea_t& out_ea) {
-    out_ea = BADADDR;
-
-    if (arg_index < 0) {
-        ctx.result_error("Internal error: invalid address argument index");
-        return false;
-    }
-
-    xsql::FunctionArg& arg = argv[arg_index];
-    const int sqlite_type = arg.type();
-
-    if (sqlite_type == SQLITE_INTEGER) {
-        out_ea = static_cast<ea_t>(arg.as_int64());
-        return true;
-    }
-
-    if (sqlite_type == SQLITE_FLOAT) {
-        const char* name = (arg_name && *arg_name) ? arg_name : "address";
-        ctx.result_error(std::string(name) + " must be an integer, numeric string, or symbol name");
-        return false;
-    }
-
-    if (sqlite_type == SQLITE_TEXT) {
-        const std::string raw = arg.as_text();
-        const std::string text = trim_copy(raw);
-        if (text.empty()) {
-            const char* name = (arg_name && *arg_name) ? arg_name : "address";
-            ctx.result_error(std::string(name) + " must not be empty");
-            return false;
-        }
-
-        ea_t parsed = BADADDR;
-        if (parse_numeric_ea_text(text, parsed)) {
-            out_ea = parsed;
-            return true;
-        }
-
-        const ea_t resolved = get_name_ea(BADADDR, text.c_str());
-        if (resolved != BADADDR) {
-            out_ea = resolved;
-            return true;
-        }
-
-        ctx.result_error("Could not resolve name to address: " + text);
-        return false;
-    }
-
-    if (sqlite_type == SQLITE_NULL) {
-        const char* name = (arg_name && *arg_name) ? arg_name : "address";
-        ctx.result_error(std::string(name) + " must not be NULL");
-        return false;
-    }
-
-    const char* name = (arg_name && *arg_name) ? arg_name : "address";
-    ctx.result_error(std::string(name) + " must be an integer, numeric string, or symbol name");
-    return false;
-}
 
 static bool parse_int_token(const std::string& token, int& out_value) {
     const std::string t = trim_copy(token);
@@ -2542,25 +2207,13 @@ void register_sql_functions(xsql::Database& db) {
     db.register_function("load_file_bytes", 4, xsql::ScalarFn(sql_load_file_bytes));
     db.register_function("load_file_bytes", 5, xsql::ScalarFn(sql_load_file_bytes));
 
-    // Byte patching
-    db.register_function("patch_byte", 2, xsql::ScalarFn(sql_patch_byte));
-    db.register_function("patch_word", 2, xsql::ScalarFn(sql_patch_word));
-    db.register_function("patch_dword", 2, xsql::ScalarFn(sql_patch_dword));
-    db.register_function("patch_qword", 2, xsql::ScalarFn(sql_patch_qword));
-    db.register_function("revert_byte", 1, xsql::ScalarFn(sql_revert_byte));
-    db.register_function("get_original_byte", 1, xsql::ScalarFn(sql_get_original_byte));
-
     // Names and types
-    db.register_function("type_at", 1, xsql::ScalarFn(sql_type_at));
-    db.register_function("set_type", 2, xsql::ScalarFn(sql_set_type));
     db.register_function("parse_decls", 1, xsql::ScalarFn(sql_parse_decls));
 
     // Decompiler (only registered if Hex-Rays is available)
     if (decompiler::hexrays_available()) {
         db.register_function("decompile", 1, xsql::ScalarFn(sql_decompile));
         db.register_function("decompile", 2, xsql::ScalarFn(sql_decompile_2));
-        db.register_function("apply_callee_type", 2, xsql::ScalarFn(sql_apply_callee_type));
-        db.register_function("callee_type_at", 1, xsql::ScalarFn(sql_callee_type_at));
         db.register_function("call_arg_addrs", 1, xsql::ScalarFn(sql_call_arg_addrs));
         db.register_function("set_union_selection", 3, xsql::ScalarFn(sql_set_union_selection));
         db.register_function("set_union_selection_item", 3, xsql::ScalarFn(sql_set_union_selection_item));
