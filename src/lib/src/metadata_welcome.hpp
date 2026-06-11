@@ -18,6 +18,8 @@ namespace metadata {
 struct WelcomeRow {
     std::string summary;
 
+    std::string idasql_version;
+
     std::string processor;
     int is_64bit = 0;
     std::string min_ea;
@@ -28,6 +30,12 @@ struct WelcomeRow {
     int segments_count = 0;
     int names_count = 0;
     int strings_count = 0;
+
+    std::string filename;
+    std::string input_file_path;
+    std::string idb_path;
+    std::string md5;
+    std::string sha256;
 };
 
 CachedTableDef<WelcomeRow> define_welcome();

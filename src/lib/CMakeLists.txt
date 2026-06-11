@@ -4,14 +4,41 @@ add_library(idasql STATIC
     src/database.cpp
     src/session.cpp
     src/address_resolution.cpp
-    src/entities.cpp
+    src/dirtree_utils.cpp
+    src/autostart_pin.cpp
+    src/core_common.cpp
+    src/core_registry.cpp
+    src/code_funcs.cpp
+    src/code_blocks.cpp
+    src/code_operand_repr.cpp
+    src/code_instructions.cpp
+    src/code_calls.cpp
+    src/code_loops.cpp
+    src/code_graph.cpp
+    src/code_cfg.cpp
+    src/symbols_names.cpp
+    src/symbols_comments.cpp
+    src/symbols_bookmarks.cpp
+    src/symbols_imports.cpp
+    src/memory_segments.cpp
+    src/memory_heads.cpp
+    src/memory_bytes.cpp
+    src/memory_strings.cpp
+    src/memory_netnode_kv.cpp
+    src/xrefs.cpp
     src/entities_ext.cpp
     src/entities_dbg.cpp
     src/entities_search.cpp
-    src/entities_types.cpp
+    src/types_common.cpp
+    src/types_base.cpp
+    src/types_applied.cpp
+    src/types_bookmarks.cpp
+    src/types_members.cpp
+    src/types_enums.cpp
+    src/types_func_args.cpp
+    src/types_registry.cpp
     src/functions.cpp
     src/decompiler.cpp
-    src/disassembly.cpp
     src/search_bytes.cpp
     src/idapython_exec.cpp
     src/metadata.cpp
@@ -26,6 +53,7 @@ target_include_directories(idasql
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
 target_compile_definitions(idasql PUBLIC

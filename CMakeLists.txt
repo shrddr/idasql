@@ -114,6 +114,32 @@ if(IDASQL_WITH_MCP)
     endif()
 endif()
 
+# ============================================================================
+# Windows VERSIONINFO resource (parses idasql_version.hpp as source of truth)
+# ============================================================================
+
+set(_idasql_version_hpp "${CMAKE_CURRENT_SOURCE_DIR}/src/common/idasql_version.hpp")
+file(READ "${_idasql_version_hpp}" _idasql_version_contents)
+string(REGEX MATCH "IDASQL_VERSION_MAJOR[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
+set(TOOL_VERSION_MAJOR "${CMAKE_MATCH_1}")
+string(REGEX MATCH "IDASQL_VERSION_MINOR[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
+set(TOOL_VERSION_MINOR "${CMAKE_MATCH_1}")
+string(REGEX MATCH "IDASQL_VERSION_PATCH[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
+set(TOOL_VERSION_PATCH "${CMAKE_MATCH_1}")
+if(TOOL_VERSION_MAJOR STREQUAL "" OR TOOL_VERSION_MINOR STREQUAL "" OR TOOL_VERSION_PATCH STREQUAL "")
+    message(FATAL_ERROR "idasql: failed to parse version from ${_idasql_version_hpp}")
+endif()
+message(STATUS "idasql: version ${TOOL_VERSION_MAJOR}.${TOOL_VERSION_MINOR}.${TOOL_VERSION_PATCH}")
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/versioninfo.cmake)
+
+# Generate ida-plugin.json from the version header so the IDA-native plugin
+# manifest can never drift from idasql_version.hpp. The generated file is the
+# packaged manifest (see src/plugin POST_BUILD copy + CI artifact upload).
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/ida-plugin.json.in"
+    "${CMAKE_BINARY_DIR}/ida-plugin.json"
+    @ONLY)
+
 # Add subdirectories
 add_subdirectory(src)
 

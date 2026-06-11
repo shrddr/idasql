@@ -8,10 +8,71 @@
 #include <idasql/database.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <system_error>
 
 #include "ida_headers.hpp"
 
 namespace idasql {
+
+namespace {
+
+int idasql_open_database(const char* path) {
+#if IDASQL_HAS_OPEN_DATABASE_3ARG
+    return open_database(path, true, nullptr);
+#else
+    return open_database(path, true);
+#endif
+}
+
+std::string to_lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool extension_equals(const std::filesystem::path& path, const char* ext) {
+    return to_lower_copy(path.extension().string()) == ext;
+}
+
+std::filesystem::path i64_sibling_for_idb(const std::filesystem::path& idb_path) {
+    namespace fs = std::filesystem;
+
+    fs::path candidate = idb_path;
+    candidate.replace_extension(".i64");
+
+    std::error_code ec;
+    fs::path parent = candidate.parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+
+    const std::string target_name = to_lower_copy(candidate.filename().string());
+    if (!fs::exists(parent, ec) || ec) {
+        return candidate;
+    }
+
+    for (const auto& entry : fs::directory_iterator(parent, ec)) {
+        if (ec) {
+            break;
+        }
+        if (to_lower_copy(entry.path().filename().string()) == target_name) {
+            return entry.path();
+        }
+    }
+
+    return candidate;
+}
+
+std::filesystem::path upgrade_log_for_idb(const std::filesystem::path& idb_path) {
+    std::filesystem::path log_path = idb_path;
+    log_path.replace_extension(".id0.upgrade.log");
+    return log_path;
+}
+
+} // namespace
 
 // ============================================================================
 // Session
@@ -20,28 +81,88 @@ namespace idasql {
 Session::~Session() { close(); }
 
 bool Session::open(const char* idb_path) {
-    if (engine_) close();
+    if (engine_ || ida_opened_) close();
     error_.clear();
+    upgraded_i64_path_.clear();
+    upgrade_log_path_.clear();
+    open_notice_.clear();
+    open_outcome_ = OpenOutcome::Failed;
 
-    // Open the database
-#if IDASQL_HAS_OPEN_DATABASE_3ARG
-    int rc = open_database(idb_path, true, nullptr);
-#else
-    int rc = open_database(idb_path, true);
-#endif
-    if (rc != 0) {
-        error_ = "Failed to open database: " + std::string(idb_path);
-        return false;
+    namespace fs = std::filesystem;
+    fs::path requested_path(idb_path ? idb_path : "");
+    fs::path open_path = requested_path;
+    bool already_opened = false;
+
+    if (extension_equals(requested_path, ".idb")) {
+        fs::path i64_path = i64_sibling_for_idb(requested_path);
+        std::error_code ec;
+        bool i64_existed_before = fs::exists(i64_path, ec);
+        if (!ec && i64_existed_before) {
+            // Freshness guard: only prefer the sibling .i64 when it is at least as
+            // new as the requested .idb. A .i64 older than its .idb is stale (the
+            // .idb was touched after the last upgrade) or unrelated, and silently
+            // making it the database of record would return the wrong analysis.
+            // Refuse and require an explicit choice instead of guessing. (mtime is
+            // a pragmatic freshness signal; it does not prove input-file identity.)
+            std::error_code idb_ec, i64_ec;
+            auto idb_mtime = fs::last_write_time(requested_path, idb_ec);
+            auto i64_mtime = fs::last_write_time(i64_path, i64_ec);
+            if (!idb_ec && !i64_ec && i64_mtime < idb_mtime) {
+                open_outcome_ = OpenOutcome::Failed;
+                error_ = "Sibling 64-bit database is older than the requested .idb and "
+                    "may be stale: " + i64_path.string() + " predates " +
+                    requested_path.string() + ". Reopen the .i64 explicitly to use it, "
+                    "or remove it to re-run analysis from the .idb.";
+                return false;
+            }
+            open_path = i64_path;
+            open_notice_ = "Opened " + i64_path.string() +
+                " (existing 64-bit database) instead of " + requested_path.string() + ".";
+        } else {
+            int rc = idasql_open_database(requested_path.string().c_str());
+            ec.clear();
+            bool i64_exists_after = fs::exists(i64_path, ec);
+            if (i64_exists_after && !i64_existed_before) {
+                if (rc == 0) {
+                    ida_opened_ = true;
+                    close_database(false);
+                    ida_opened_ = false;
+                }
+                open_outcome_ = OpenOutcome::UpgradedReopenRequired;
+                upgraded_i64_path_ = i64_path.string();
+                upgrade_log_path_ = upgrade_log_for_idb(requested_path).string();
+                error_ = "Database upgraded from 32-bit .idb to 64-bit .i64; reopen with: " +
+                    upgraded_i64_path_;
+                return false;
+            }
+
+            if (rc != 0) {
+                error_ = "Failed to open or upgrade database: " + requested_path.string() +
+                    " (legacy .idb upgrades require a writable directory)";
+                return false;
+            }
+
+            ida_opened_ = true;
+            open_path = requested_path;
+            already_opened = true;
+        }
     }
-    ida_opened_ = true;
+
+    if (!already_opened) {
+        int rc = idasql_open_database(open_path.string().c_str());
+        if (rc != 0) {
+            error_ = "Failed to open database: " + open_path.string();
+            return false;
+        }
+        ida_opened_ = true;
+    }
 
     // Wait for auto-analysis (no-op if the user disabled AA — see ida_compat.hpp)
     idasql_auto_wait();
 
     // For new analysis (exe/dll/etc), build strings after auto-analysis completes
     // For existing databases (i64/idb), strings are already saved
-    std::string path_lower = idb_path;
-    std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+    std::string path_lower = to_lower_copy(open_path.string());
     auto ends_with = [](const std::string& s, const std::string& suffix) {
         return s.size() >= suffix.size() &&
                s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -67,10 +188,12 @@ bool Session::open(const char* idb_path) {
     if (!engine_->is_valid()) {
         error_ = engine_->error();
         close();
+        open_outcome_ = OpenOutcome::Failed;
         return false;
     }
 
     error_.clear();
+    open_outcome_ = OpenOutcome::Ok;
     return true;
 }
 

@@ -32,6 +32,12 @@ if(WIN32)
     )
 endif()
 
+# Windows VS_VERSION_INFO resource
+xsql_add_versioninfo(idasql_cli
+    FILETYPE          VFT_APP
+    DESCRIPTION       "idasql command-line interface for IDA databases"
+    ORIGINAL_FILENAME "idasql.exe")
+
 # Platform-specific settings
 if(MSVC)
     target_compile_options(idasql_cli PRIVATE /bigobj)

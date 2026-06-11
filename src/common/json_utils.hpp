@@ -244,10 +244,9 @@ inline std::string query_result_to_json_safe(const QueryResult& result) {
     return out;
 }
 
-// NOTE: query_script_result_to_json_safe was removed during the multi-statement
-// unification. All callers now go through idasql::run_sql_script (see
-// sql_script.hpp) and emit JSON via xsql::script_result_to_json. The single
-// per-statement helper query_result_to_json_safe above is retained for
-// internal callers that work with a raw QueryResult.
+// Multi-statement JSON emission goes through idasql::run_sql_script (see
+// sql_script.hpp) + xsql::script_result_to_json. The per-statement helper
+// query_result_to_json_safe above is for internal callers working with a
+// raw QueryResult.
 
 } // namespace idasql

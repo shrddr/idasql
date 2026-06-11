@@ -6,6 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "mcp_server.hpp"
+#include "idasql_version.hpp"
 #include <idasql/runtime_settings.hpp>
 
 #include <fastmcpp/mcp/handler.hpp>
@@ -203,7 +204,7 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
 
     auto handler = fastmcpp::mcp::make_mcp_handler(
         "idasql",
-        "1.0.0",
+        IDASQL_VERSION_STRING,
         impl_->tool_manager,
         descriptions
     );

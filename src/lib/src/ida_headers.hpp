@@ -6,12 +6,21 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * ida_headers.hpp - Precompiled header for IDA SDK includes
+ * ida_headers.hpp - Precompiled header for the idasql library.
  *
- * Contains the full superset of all IDA SDK headers used across the library.
- * Include this instead of individual IDA headers in private .cpp/.hpp files.
+ * Registered as the PCH via target_precompile_headers() in
+ * src/lib/CMakeLists.txt. Every .cpp/.hpp in the idasql library should
+ * `#include "ida_headers.hpp"` rather than including individual IDA SDK
+ * headers (<ida.hpp>, <kernwin.hpp>, ...) directly -- this keeps PCH hits
+ * consistent and centralizes platform/MSVC workarounds.
  *
- * Usage: #include "ida_headers.hpp"
+ * Aggregates: <idasql/platform.hpp> fixups, the std headers we need
+ * before the SDK, the full IDA SDK superset, the MSVC strtoull undef,
+ * and the cross-SDK compat shims in ida_compat.hpp.
+ *
+ * NOT in this PCH:
+ *   - widget_catalog.hpp -- include explicitly when you use BWN_*
+ *     classification helpers (only ui_context_provider.cpp today).
  *
  * Note: platform.hpp must still be included BEFORE standard library headers
  * in each TU (it sets up macOS typedef redirects that affect system headers).
@@ -71,6 +80,7 @@
 #include <moves.hpp>
 #include <nalt.hpp>
 #include <name.hpp>
+#include <offset.hpp>
 #include <problems.hpp>
 #include <segment.hpp>
 #include <strlist.hpp>

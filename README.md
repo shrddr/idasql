@@ -180,13 +180,14 @@ then install the `idasql` plugin from that marketplace. See the [idasql-skills R
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.16 - SQL interface to IDA databases
+idasql v0.0.17 - SQL interface to IDA databases
 
 Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]
 
 Options:
   -s <file>            IDA database (.idb/.i64) OR raw binary (.exe/.dll/firmware/etc.)
                        — raw binaries trigger fresh idalib analysis and string-list rebuild
+                       — legacy 32-bit .idb files upgrade to .i64 and require an explicit reopen
   --token <token>      Auth token for HTTP/MCP server mode (if server requires it)
   -q <sql>             Execute SQL query or semicolon-separated script
   -f <file>            Execute SQL from file
@@ -206,11 +207,16 @@ Examples:
   idasql -s test.i64 -i
   idasql -s test.i64 --export dump.sql
   idasql -s test.i64 --http 8080
-  idasql -s sample.exe --http 8081       # raw PE: idalib auto-analyzes, then serves SQL
+  idasql -s sample.exe --http            # raw PE: idalib auto-analyzes, then serves SQL (default port 8080)
   idasql -s firmware.bin -q "SELECT * FROM welcome"
 
 Thank you for using IDA. Have a nice day!
 ```
+
+Legacy 32-bit `.idb` inputs are upgraded by idalib to a sibling `.i64`. When that
+happens, idasql exits before serving SQL, returns exit code `3`, and prints one
+JSON object to stdout with `status:"upgraded"` and `reopen_with`. Repeat the same
+operation with `-s <reopen_with>`.
 
 </details>
 
@@ -337,7 +343,7 @@ Notes:
 |----------|-------------|
 | `decompile(addr)` | Decompile function at address (returns pseudocode) |
 | `disasm_at(addr)` | Canonical disassembly listing at address |
-| `get_ui_context_json()` | Plugin-only UI context JSON (GUI runtime only) |
+| `get_ui_context_json()` | UI context JSON — live in the GUI plugin; a "not applicable" stub under CLI/idalib |
 
 ### Unified Entity Search
 
@@ -379,13 +385,13 @@ LIMIT 20 OFFSET 20;
 Stateless HTTP server for simple integration. No protocol overhead.
 
 ```bash
-idasql -s database.i64 --http 8081
+idasql -s database.i64 --http 8080
 ```
 
 ```bash
-curl http://localhost:8081/status
-curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
-curl -X POST http://localhost:8081/query -d "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
+curl http://localhost:8080/status
+curl -X POST http://localhost:8080/query -d "SELECT name FROM funcs LIMIT 5"
+curl -X POST http://localhost:8080/query -d "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
 ```
 
 All `/query` responses use the canonical script envelope — single statement = array of one entry:
@@ -409,7 +415,7 @@ Fail-fast is the default; pass `continue_on_error=true` (e.g. `?continue_on_erro
 For multiple databases, run separate instances:
 
 ```bash
-idasql -s malware.i64 --http 8081
+idasql -s malware.i64 --http 8080
 idasql -s kernel.i64 --http 8082
 ```
 
@@ -438,6 +444,45 @@ HTTP server stopped
 
 The server uses a random port (8100-8199) to avoid conflicts with `--http`.
 
+### Autostart (Pinning)
+
+`.pin` persists a server preference in the IDB (netnode `$ idasql config`) so the
+**IDA plugin auto-starts** an HTTP or MCP server whenever that database is opened —
+handy for multi-instance setups where each database keeps a stable, known port.
+
+```
+idasql> .pin set http 8080        # pin HTTP at 127.0.0.1:8080 (autostart on)
+idasql> .pin set mcp 0.0.0.0 9500 # bind override + port (port is required)
+idasql> .pin list                 # show pinned config
+idasql> .pin off http             # disable autostart but keep host/port
+idasql> .pin clear all            # remove all pins
+```
+
+After pinning, reopening the database auto-starts the server — you'll see this
+in the IDA output window on load:
+
+```
+IDASQL v0.0.17: Query engine initialized
+IDASQL CLI: Installed
+IDASQL: autostart -> IDASQL HTTP server: http://127.0.0.1:8099
+Type '.http stop' to stop the server.
+```
+
+`.pin` (or `.pin list`) shows the current configuration for both services:
+
+```
+idasql> .pin
+Autostart pins:
+  http 127.0.0.1:8099  (autostart: on)
+  mcp  (not set)
+```
+
+- **Autostart-on-load happens only in the IDA plugin.** The `.pin` command itself
+  works in both the CLI and the plugin (the CLI just reads/writes the pin).
+- `.http start` / `.mcp start` with **no explicit port** reuse the pinned host/port.
+- From the CLI, `.pin` changes persist only when started with `-w/--write`
+  (like any other IDB edit).
+
 ### MCP Server
 
 For MCP-compatible clients (Model Context Protocol, a standard for AI tool integration):
@@ -465,6 +510,28 @@ Configure your MCP client:
 ```
 
 Tools: `idasql_query` (direct SQL query or semicolon-separated script)
+
+## The xsql family
+
+IDASQL is part of a family of tools that expose different binary-analysis and
+debug-information platforms through the **same** SQL surface, all built on the
+shared [libxsql](https://github.com/0xeb/libxsql) virtual-table framework. A
+query you learn against one tool largely carries over to the others — e.g. the
+same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
+
+**Reverse-engineering platforms**
+- **idasql** (this project) — IDA Pro databases as SQL.
+- **[bnsql](https://github.com/0xeb/bnsql)** — Binary Ninja databases as SQL.
+- **[ghidrasql](https://github.com/0xeb/ghidrasql)** — Ghidra databases as SQL.
+
+**Debug info & compiler data**
+- **[pdbsql](https://github.com/0xeb/pdbsql)** — Windows PDB symbol files as SQL.
+- **[dwarfsql](https://github.com/0xeb/dwarfsql)** — DWARF debug information as SQL.
+- **[clangsql](https://github.com/0xeb/clangsql)** — Clang AST as SQL.
+
+**Core**
+- **[libxsql](https://github.com/0xeb/libxsql)** — the C++ SQLite virtual-table
+  framework every tool above is built on.
 
 ## Built With
 

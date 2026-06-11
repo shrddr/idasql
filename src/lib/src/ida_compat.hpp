@@ -74,3 +74,17 @@ inline void idasql_auto_wait()
         return;
     auto_wait();
 }
+
+/**
+ * is_ida_library() distinguishes the idalib/CLI runtime from a full IDA (GUI
+ * plugin) runtime. It gained default arguments in SDK 9.2; older SDKs require
+ * all three. Wrap it so call sites never repeat the version guard.
+ */
+inline bool idasql_is_ida_library()
+{
+#if IDASQL_HAS_IS_IDA_LIBRARY_NOARG
+    return is_ida_library();
+#else
+    return is_ida_library(nullptr, 0, nullptr);
+#endif
+}

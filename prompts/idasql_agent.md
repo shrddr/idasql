@@ -26,15 +26,12 @@ A comprehensive reference for AI agents to effectively use IDASQL - an SQL inter
 ### Addresses (ea_t)
 Everything in a binary has an **address** - a memory location where code or data lives. IDA uses `ea_t` (effective address) as unsigned 64-bit integers. SQL shows these as integers; use `printf('0x%X', address)` for hex display.
 
-Address-taking SQL functions accept:
-- integer EA values (preferred for deterministic scripts)
-- numeric strings (`'4198400'`, `'0x401000'`)
-- symbol names resolved with `get_name_ea(BADADDR, name)` (global names)
+Address-taking SQL functions accept integer EAs (`0x401000`), numeric
+strings (`'0x401000'`), and global symbol names (`'DriverEntry'`); symbol
+names resolve via `get_name_ea`. Table predicates compare address columns
+to integer EAs (e.g. `WHERE address = 0x401000`). Unresolved symbols
+return `Could not resolve name to address: <name>`.
 
-Quoted numeric strings are for address-taking scalar functions. For table
-predicates, compare address columns to integer EAs such as `address = 0x401000`.
-
-Examples:
 ```sql
 SELECT decompile('DriverEntry');
 UPDATE applied_types
@@ -42,11 +39,6 @@ SET decl = 'NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);'
 WHERE address = 'DriverEntry';
 SELECT (SELECT comment FROM comments WHERE address = 0x401000 LIMIT 1);
 ```
-
-If a symbol cannot be resolved, SQL functions return an explicit error like:
-`Could not resolve name to address: <name>`.
-
-Local label lookup that depends on a specific `from` context is not consulted by default (`BADADDR` resolution). Use explicit numeric EAs when needed.
 
 ### Functions
 IDA groups code into **functions** with:
@@ -122,21 +114,21 @@ Behavior contract:
 - Capture code context (address/function/segment) when available.
 - In non-address views, return structured context with `has_address: false` and a reason.
 
-Temporal reference policy:
-- For `this` / `here` / `current` / `selected`, capture a fresh context snapshot for this user question.
-- For `that` / `previous` / `earlier`, use the most recently captured snapshot for this working flow when available.
-
-Freshness rule:
-- Capture context once per user question, then reuse it while answering that question.
-- Refresh context only when the user explicitly asks to re-check or refresh the UI context.
+Capture a fresh context snapshot per user question; reuse it across that
+question's turns; refresh only when the user explicitly asks to re-check.
 
 Availability:
-- `get_ui_context_json()` is plugin-only (GUI runtime).
-- It is not available in idalib/CLI mode.
-- If unavailable, continue with non-UI SQL workflows and state that UI context is unavailable in this runtime.
+- `get_ui_context_json()` is registered in every runtime, but only returns live
+  UI state in the IDA GUI plugin.
+- Under idalib/CLI it returns a stub envelope (`available:false`,
+  `capture.source:"cli"`) — no error, just no UI.
+- If the result is the CLI stub, continue with non-UI SQL workflows and state that
+  UI context is unavailable in this runtime.
 
 Database orientation:
 - Use `SELECT * FROM welcome` for a quick database overview (processor, bitness, address range, entry point, counts).
+- To confirm which binary/instance this connection is bound to, query the file-identity columns: `SELECT filename, idb_path, md5, sha256 FROM welcome`.
+- For audit/version checks, `idasql_version` reports the IDASQL build version: `SELECT idasql_version, filename, idb_path, md5, sha256 FROM welcome`.
 - The `welcome` table contains only database metadata — no UI context.
 - For UI context (focused widget, selection, code location), use `get_ui_context_json()`.
 
@@ -191,12 +183,12 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 
 | Option | Description |
 |--------|-------------|
-| `-s <file>` | IDA database (`.idb`/`.i64`) **or** raw binary (`.exe`/`.dll`/firmware/etc.) — raw binaries trigger fresh idalib analysis and string-list rebuild |
+| `-s <file>` | IDA database (`.idb`/`.i64`) **or** raw binary (`.exe`/`.dll`/firmware/etc.) — raw binaries trigger fresh idalib analysis and string-list rebuild; legacy 32-bit `.idb` may return `status:"upgraded"` with `reopen_with` |
 | `--token <token>` | Auth token for HTTP/MCP server mode |
 | `-q <sql>` | Execute single SQL query |
 | `-f <file>` | Execute SQL from file |
 | `-i` | Interactive REPL mode |
-| `-w, --write` | Save database changes on exit |
+| `-w, --write` | Save database changes on exit, including HTTP/MCP server shutdown |
 | `--export <file>` | Export tables to SQL file |
 | `--export-tables=X` | Tables to export: `*` (all) or `table1,table2,...` |
 | `--http [port]` | Start HTTP REST server (default: 8080, local mode only) |
@@ -213,17 +205,21 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 | `.tables` | List all virtual tables |
 | `.schema [table]` | Show table schema |
 | `.info` | Show database metadata |
-| `.clear` | Clear session |
 | `.quit` / `.exit` | Exit REPL |
 | `.help` | Show available commands |
-| `.http start` | Start HTTP server on random port |
+| `.http start` | Start HTTP server (reuses a pinned port when none is given) |
 | `.http stop` | Stop HTTP server |
-| `.http status` | Show HTTP server status |
-| `.agent` | Start AI agent mode |
+| `.http` | Show HTTP server status (start if not running) |
+| `.pin set http\|mcp [bind] <port>` | Pin a server for autostart (IDB-persisted; plugin auto-starts on open) |
+| `.pin on\|off http\|mcp` / `.pin clear [http\|mcp\|all]` / `.pin list` | Manage autostart pins |
 
 ### Performance Strategy
 
 Opening a database has startup overhead (IDALib initialization and auto-analysis wait). For one query, use `-q`. For iterative work, keep one long-lived session (`-i`, `--http`, or `--mcp`) and run many queries against it.
+
+If opening a legacy 32-bit `.idb` returns exit code `3` with stdout JSON
+`status:"upgraded"`, repeat the same requested command with the JSON
+`reopen_with` path. HTTP/MCP server modes exit before binding in this case.
 
 **Single queries:** Use `-q` directly.
 ```bash
@@ -247,6 +243,7 @@ curl -X POST http://localhost:8080/query -d "SELECT name, size FROM funcs ORDER 
 ```
 
 This approach is significantly faster for iterative analysis since the database remains open and queries go directly through the already-initialized session.
+Use `-w` for long-lived HTTP/MCP write sessions when edits should be saved on shutdown; otherwise writes are visible in the current process but must be flushed with `SELECT save_database()`.
 
 ### Runtime Controls (SQL)
 
@@ -281,55 +278,7 @@ For decompiler-heavy queries, `idasql` emits warnings that suggest adding `WHERE
 ### Debugger Tables (Full CRUD)
 
 #### breakpoints
-Debugger breakpoints. Supports full CRUD (SELECT, INSERT, UPDATE, DELETE). Breakpoints persist in the IDB even without an active debugger session.
-
-| Column | Type | RW | Description |
-|--------|------|----|-------------|
-| `address` | INT | R | Breakpoint address |
-| `enabled` | INT | RW | 1=enabled, 0=disabled |
-| `type` | INT | RW | Breakpoint type (0=software, 1=hw_write, 2=hw_read, 3=hw_rdwr, 4=hw_exec) |
-| `type_name` | TEXT | R | Type name (software, hardware_write, etc.) |
-| `size` | INT | RW | Breakpoint size (for hardware breakpoints) |
-| `flags` | INT | RW | Breakpoint flags |
-| `pass_count` | INT | RW | Pass count before trigger |
-| `condition` | TEXT | RW | Condition expression |
-| `loc_type` | INT | R | Location type code |
-| `loc_type_name` | TEXT | R | Location type (absolute, relative, symbolic, source) |
-| `module` | TEXT | R | Module path (relative breakpoints) |
-| `symbol` | TEXT | R | Symbol name (symbolic breakpoints) |
-| `offset` | INT | R | Offset (relative/symbolic) |
-| `source_file` | TEXT | R | Source file (source breakpoints) |
-| `source_line` | INT | R | Source line number |
-| `is_hardware` | INT | R | 1=hardware breakpoint |
-| `is_active` | INT | R | 1=currently active |
-| `group` | TEXT | RW | Breakpoint group name |
-| `bptid` | INT | R | Breakpoint ID |
-
-```sql
--- List all breakpoints
-SELECT printf('0x%08X', address) as addr, type_name, enabled, condition
-FROM breakpoints;
-
--- Add software breakpoint
-INSERT INTO breakpoints (address) VALUES (0x401000);
-
--- Add hardware write watchpoint
-INSERT INTO breakpoints (address, type, size) VALUES (0x402000, 1, 4);
-
--- Add conditional breakpoint
-INSERT INTO breakpoints (address, condition) VALUES (0x401000, 'eax == 0');
-
--- Disable a breakpoint
-UPDATE breakpoints SET enabled = 0 WHERE address = 0x401000;
-
--- Delete a breakpoint
-DELETE FROM breakpoints WHERE address = 0x401000;
-
--- Find which functions have breakpoints
-SELECT b.address, f.name, b.type_name, b.enabled
-FROM breakpoints b
-JOIN funcs f ON b.address >= f.address AND b.address < f.end_ea;
-```
+Debugger breakpoints with full CRUD. Persist in the IDB even without an active debugger session. Schema, all 19 columns, and worked examples: see the `debugger` skill.
 
 ### Entity Tables
 
@@ -337,250 +286,83 @@ Entity tables expose IDA's core program objects (functions, names, segments, imp
 Some tables support write operations; when they do, the section includes RW columns and examples.
 
 #### funcs
-All detected functions in the binary with prototype information.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Function start address |
-| `name` | TEXT | Function name |
-| `size` | INT | Function size in bytes |
-| `end_ea` | INT | Function end address |
-| `flags` | INT | Function flags |
-
-**Prototype columns** (populated when type info available):
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `return_type` | TEXT | Return type string (e.g., "int", "void *") |
-| `return_is_ptr` | INT | 1 if return type is pointer |
-| `return_is_int` | INT | 1 if return type is exactly int |
-| `return_is_integral` | INT | 1 if return type is int-like (int, long, DWORD, BOOL) |
-| `return_is_void` | INT | 1 if return type is void |
-| `arg_count` | INT | Number of function arguments |
-| `calling_conv` | TEXT | Calling convention (cdecl, stdcall, fastcall, etc.) |
+All detected functions in the binary. Writable: `name`, `prototype`, `comment`, `rpt_comment`, `flags`, `folder_path`. `folder_path` is relative to the Function window root; `NULL` or `''` moves a function back to root. `full_path` is read-only and includes the final function name. Schema (basic + prototype + folder columns), and worked examples: see the `disassembly` and `annotations` skills.
 
 ```sql
--- 10 largest functions
-SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10;
-
--- Functions starting with "sub_" (auto-named, not analyzed)
-SELECT name, printf('0x%X', address) as addr FROM funcs WHERE name LIKE 'sub_%';
-
--- Functions returning integers with 3+ arguments
-SELECT name, return_type, arg_count FROM funcs
-WHERE return_is_integral = 1 AND arg_count >= 3;
-
--- Void functions (side effects, callbacks)
-SELECT name, arg_count FROM funcs WHERE return_is_void = 1;
-
--- Pointer-returning functions (factories, allocators)
-SELECT name, return_type FROM funcs WHERE return_is_ptr = 1;
-
--- Simple getter functions (no args, returns value)
-SELECT name, return_type FROM funcs
-WHERE arg_count = 0 AND return_is_void = 0;
-
--- Functions by calling convention
-SELECT calling_conv, COUNT(*) as count FROM funcs
-WHERE calling_conv IS NOT NULL AND calling_conv != ''
-GROUP BY calling_conv ORDER BY count DESC;
+INSERT INTO dirtree_folders(tree, path) VALUES ('funcs', 'idasql/review');
+UPDATE funcs SET folder_path = 'idasql/review' WHERE address = 0x401000;
+SELECT address, name, folder_path, full_path FROM funcs WHERE folder_path LIKE 'idasql/%';
 ```
 
 #### segments
-Memory segments. Supports UPDATE (`name`, `class`, `perm`) and DELETE.
-
-| Column | Type | RW | Description |
-|--------|------|----|-------------|
-| `start_ea` | INT | R | Segment start |
-| `end_ea` | INT | R | Segment end |
-| `name` | TEXT | RW | Segment name (.text, .data, etc.) |
-| `class` | TEXT | RW | Segment class (CODE, DATA) |
-| `perm` | INT | RW | Permissions (R=4, W=2, X=1) |
-
-```sql
--- Find executable segments
-SELECT name, printf('0x%X', start_ea) as start FROM segments WHERE perm & 1 = 1;
-
--- Rename a segment
-UPDATE segments SET name = '.mytext' WHERE start_ea = 0x401000;
-
--- Change segment permissions to read+exec
-UPDATE segments SET perm = 5 WHERE name = '.text';
-
--- Delete a segment
-DELETE FROM segments WHERE name = '.rdata';
-```
+Memory segments. Writable: `name`, `class`, `perm`. Schema and examples: see the `disassembly` skill.
 
 #### names
-All named locations (functions, labels, data). Supports INSERT, UPDATE, and DELETE.
-
-| Column | Type | RW | Description |
-|--------|------|----|-------------|
-| `address` | INT | R | Address |
-| `name` | TEXT | RW | Name |
-
-```sql
--- Create/set a name
-INSERT INTO names (address, name) VALUES (0x401000, 'my_symbol');
-
--- Rename
-UPDATE names SET name = 'my_symbol_renamed' WHERE address = 0x401000;
-
--- Remove name at address
-DELETE FROM names WHERE address = 0x401000;
-```
+All named locations (functions, labels, data). Full CRUD on `name` keyed by `address`; writable `folder_path` organizes names in IDA's Names tree and `full_path` is read-only. Schema and examples: see the `annotations` and `disassembly` skills.
 
 #### entries
-Entry points (exports, program entry, tls callbacks, etc.).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ordinal` | INT | Export ordinal |
-| `address` | INT | Entry address |
-| `name` | TEXT | Entry name |
+Entry points (exports, program entry, TLS callbacks). Columns: `ordinal`, `address`, `name`. See the `disassembly` skill.
 
 #### imports
-Imported functions from external libraries.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Import address (IAT entry) |
-| `name` | TEXT | Import name |
-| `module` | TEXT | Module/DLL name |
-| `ordinal` | INT | Import ordinal |
-
-```sql
--- Imports from kernel32.dll
-SELECT name FROM imports WHERE module LIKE '%kernel32%';
-```
+Imported functions from external libraries. Columns include `address`, `name`, `module`, `ordinal`, writable `folder_path`, and read-only `full_path`. Import folder moves do not change module/name/ordinal metadata. See the `analysis` and `xrefs` skills.
 
 #### strings
-String literals found in the binary. IDA maintains a cached string list that can be configured.
+String literals found in the binary. Columns: `address`, `length`, `type`,
+`type_name`, `width`, `width_name`, `layout`, `layout_name`, `encoding`,
+`content`. Run `SELECT rebuild_strings()` once if the count is empty. Full
+schema, encoding bit layout, and worked queries live in the `data` skill.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | String address |
-| `length` | INT | String length |
-| `type` | INT | String type (raw encoding bits) |
-| `type_name` | TEXT | Type name: ascii, utf16, utf32 |
-| `width` | INT | Char width (0=1-byte, 1=2-byte, 2=4-byte) |
-| `width_name` | TEXT | Width name: 1-byte, 2-byte, 4-byte |
-| `layout` | INT | String layout (0=null-terminated, 1-3=pascal) |
-| `layout_name` | TEXT | Layout name: termchr, pascal1, pascal2, pascal4 |
-| `encoding` | INT | Encoding index (0=default) |
-| `content` | TEXT | String content |
-
-**String Type Encoding:**
-IDA stores string type as a 32-bit value:
-- Bits 0-1: Width (0=1B/ASCII, 1=2B/UTF-16, 2=4B/UTF-32)
-- Bits 2-7: Layout (0=TERMCHR, 1=PASCAL1, 2=PASCAL2, 3=PASCAL4)
-- Bits 8-15: term1 (first termination character)
-- Bits 16-23: term2 (second termination character)
-- Bits 24-31: encoding index
-
-```sql
--- Find error messages
-SELECT content, printf('0x%X', address) as addr FROM strings WHERE content LIKE '%error%';
-
--- ASCII strings only
-SELECT * FROM strings WHERE type_name = 'ascii';
-
--- UTF-16 strings (common in Windows)
-SELECT * FROM strings WHERE type_name = 'utf16';
-
--- Count strings by type
-SELECT type_name, layout_name, COUNT(*) as count
-FROM strings GROUP BY type_name, layout_name ORDER BY count DESC;
-```
-
-**Important:** For new analysis (exe/dll), strings are auto-built. For existing databases (i64/idb), strings are already saved. If you see 0 strings unexpectedly, run `SELECT rebuild_strings()` once to rebuild the list. See String List Surfaces section below.
-
-Current count:
 ```sql
 SELECT COUNT(*) AS strings FROM strings;
+SELECT content, printf('0x%X', address) AS addr FROM strings WHERE content LIKE '%error%';
 ```
 
 #### xrefs
-Cross-references - the most important table for understanding code relationships.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `from_ea` | INT | Source address (who references) |
-| `to_ea` | INT | Target address (what is referenced) |
-| `type` | INT | Xref type code |
-| `is_code` | INT | 1=code xref (call/jump), 0=data xref |
-
-```sql
--- Who calls function at 0x401000?
-SELECT printf('0x%X', from_ea) as caller FROM xrefs WHERE to_ea = 0x401000 AND is_code = 1;
-
--- What does function at 0x401000 reference?
-SELECT printf('0x%X', to_ea) as target FROM xrefs WHERE from_ea >= 0x401000 AND from_ea < 0x401100;
-```
+Cross-references — the canonical surface for code/data relationships. Columns: `from_ea`, `to_ea`, `type`, `is_code`. Filter by `to_ea` (incoming refs) or `from_ea` (outgoing refs). Schema, encoding details, and recovery patterns: see the `xrefs` skill.
 
 #### blocks
-Basic blocks within functions. **Use `func_ea` constraint for performance.**
+Basic blocks within functions. Columns: `func_ea`, `start_ea`, `end_ea`, `size`. **`WHERE func_ea = X` is the optimized path** — without it the table scans all functions. See the `disassembly` skill.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_ea` | INT | Containing function |
-| `start_ea` | INT | Block start |
-| `end_ea` | INT | Block end |
-| `size` | INT | Block size |
+### Dirtree Folder Tables
+
+IDA's directory-tree API backs function folders, local type folders, names, imports, breakpoints, and bookmark trees. Prefer object-table `folder_path` columns for normal organization (`funcs`, `types`, `names`, `imports`, `bookmarks`, `breakpoints`, `local_type_bookmarks`); use generic dirtree tables for browsing and folder lifecycle.
+
+#### dirtree_entries
+Read-only raw dirtree listing. Columns: `tree`, `path`, `parent_path`, `name`, `is_dir`, `is_file`, `inode`, `rank`, `attrs`, `depth`, `orderable`. Use `tree = 'funcs'` or another standard tree when possible; `path LIKE '/prefix/%'`, `parent_path`, `inode`, `is_dir`, and `is_file` push down.
 
 ```sql
--- Blocks in a specific function (FAST - uses constraint pushdown)
-SELECT * FROM blocks WHERE func_ea = 0x401000;
+SELECT name, inode
+FROM dirtree_entries
+WHERE tree = 'imports' AND parent_path = '/KERNEL32';
 
--- Functions with most basic blocks
-SELECT (SELECT name FROM funcs WHERE func_ea >= address AND func_ea < end_ea LIMIT 1) as name, COUNT(*) as blocks
-FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
+SELECT f.address, f.name, e.path
+FROM funcs f
+JOIN dirtree_entries e ON e.tree = 'funcs' AND e.inode = f.address
+WHERE e.path LIKE '/idasql/%';
 ```
-`WHERE func_ea = X` is the optimized path. Without it, `blocks` may scan all functions.
+
+#### dirtree_folders
+Writable empty-folder lifecycle for all standard trees: `funcs`, `local_types`, `names`, `imports`, `idaplace_bookmarks`, `bpts`, and `ltypes_bookmarks`. `INSERT` creates folders, `UPDATE path` renames/moves folders, and `DELETE` removes only empty folders.
+
+Folder paths use `/` separators. Object-table `folder_path` values are relative paths such as `idasql/network`; `NULL` or `''` means root. Invalid components (`.`, `..`, duplicate separators, backslashes) are rejected on writes. Renaming a folder to an existing file/folder path is rejected so IDASQL does not inherit IDA's ambiguous raw "move into existing folder" behavior.
+`dirtree_entries` is read-only diagnostics; recursive delete and raw recovery/link operations are not exposed through SQL.
+
+```sql
+INSERT INTO dirtree_folders(tree, path) VALUES ('funcs', 'idasql/network');
+UPDATE dirtree_folders SET path = 'idasql/net'
+WHERE tree = 'funcs' AND path = 'idasql/network';
+DELETE FROM dirtree_folders WHERE tree = 'funcs' AND path = 'idasql/net';
+```
 
 ### Convenience Views
 
 Pre-built views for common xref analysis patterns. These simplify caller/callee queries.
 
 #### callers
-Who calls each function. Use this instead of manual xref JOINs.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Target function address |
-| `caller_addr` | INT | Xref source address |
-| `caller_name` | TEXT | Calling function name |
-| `caller_func_addr` | INT | Calling function start |
-
-```sql
--- Who calls function at 0x401000?
-SELECT caller_name, printf('0x%X', caller_addr) as from_addr
-FROM callers WHERE func_addr = 0x401000;
-
--- Most called functions
-SELECT printf('0x%X', func_addr) as addr, COUNT(*) as callers
-FROM callers GROUP BY func_addr ORDER BY callers DESC LIMIT 10;
-```
+Who calls each function. Columns: `func_addr`, `caller_addr`, `caller_name`, `caller_func_addr`. Filter `WHERE func_addr = X`. See the `xrefs` skill.
 
 #### callees
-What each function calls. Inverse of callers view.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Calling function address |
-| `func_name` | TEXT | Calling function name |
-| `callee_addr` | INT | Called address |
-| `callee_name` | TEXT | Called function/symbol name |
-
-```sql
--- What does main call?
-SELECT callee_name, printf('0x%X', callee_addr) as addr
-FROM callees WHERE func_name LIKE '%main%';
-
--- Functions making most calls
-SELECT func_name, COUNT(*) as call_count
-FROM callees GROUP BY func_addr ORDER BY call_count DESC LIMIT 10;
-```
+What each function calls. Columns: `func_addr`, `func_name`, `callee_addr`, `callee_name`. Inverse of `callers`. See the `xrefs` skill.
 
 #### String References (explicit join pattern)
 
@@ -612,94 +394,21 @@ LIMIT 10;
 
 #### instructions
 
-`instructions` is the disassembly table. For scalar disassembly text at a specific EA, use `disasm_at(ea[, context])`.
-Use `disasm_func()` or `disasm_range()` when you explicitly need a function/range listing.
-Decoded instructions support DELETE (converts instruction to unexplored bytes) and operand representation updates via `operand*_format_spec`.
-
-`WHERE func_addr = X` is the fast path (function-item iterator). Without it, the table scans all code heads.
-If `X` is not a valid function start/address in a function, the constrained iterator returns no rows.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Instruction address |
-| `func_addr` | INT | Containing function |
-| `itype` | INT | Instruction type (architecture-specific) |
-| `mnemonic` | TEXT | Instruction mnemonic |
-| `size` | INT | Instruction size |
-| `operand0..operand7` | TEXT | Operand text (`0..7`) |
-| `disasm` | TEXT | Full disassembly line |
-| `operand0_class..operand7_class` | TEXT | Operand class: `reg`, `imm`, `displ`, `mem`, ... |
-| `operand0_repr_kind..operand7_repr_kind` | TEXT | Current representation: `plain`, `enum`, `stroff` |
-| `operand0_repr_type_name..operand7_repr_type_name` | TEXT | Enum name or stroff path (`Type/SubType`) |
-| `operand0_repr_member_name..operand7_repr_member_name` | TEXT | Enum member expression when applicable |
-| `operand0_repr_serial..operand7_repr_serial` | INT | Enum serial (duplicate-value enums) |
-| `operand0_repr_delta..operand7_repr_delta` | INT | Stroff delta |
-| `operand0_format_spec..operand7_format_spec` | TEXT (RW) | Apply/clear representation for a specific operand |
-
-```sql
--- Instruction profile of a function (FAST)
-SELECT mnemonic, COUNT(*) as count
-FROM instructions WHERE func_addr = 0x401330
-GROUP BY mnemonic ORDER BY count DESC;
-
--- Find all call instructions in a function
-SELECT address, disasm FROM instructions
-WHERE func_addr = 0x401000 AND mnemonic = 'call';
-
--- Delete an instruction (convert to unexplored bytes)
-DELETE FROM instructions WHERE address = 0x401000;
-
--- Apply enum representation to operand 1
-UPDATE instructions
-SET operand1_format_spec = 'enum:MY_ENUM'
-WHERE address = 0x401020;
-
--- Apply struct-offset representation with optional delta
-UPDATE instructions
-SET operand0_format_spec = 'stroff:MY_STRUCT,delta=0'
-WHERE address = 0x401030;
-
--- Clear representation back to plain
-UPDATE instructions
-SET operand1_format_spec = 'clear'
-WHERE address = 0x401020;
-```
+The disassembly table. **`WHERE func_addr = X` is the fast path**;
+without it the table scans all code heads. Supports DELETE (converts
+to unexplored bytes) and operand-representation updates via the
+writable `operand0..7_format_spec` columns. Specs (all
+disassembly-level, no IDAPython): `hex`/`dec`/`oct`/`bin`, `char`,
+`float`, `offset[:base]`, `enum:NAME[::MEMBER]`,
+`stroff:TYPE[/NESTED][,delta=N]`, `sizeof:STRUCT` (renders
+`size STRUCT`), `segment`, `stkvar`, `forced:TEXT`, `clear`; plus
+`,signed`/`,unsigned`/`,bnot`/`,nobnot` modifiers. Full schema (all
+60+ operand columns), worked examples, and representation-spec
+syntax: see the `disassembly` skill.
 
 #### instruction_operands
 
-`instruction_operands` exposes one row per decoded non-void operand. Use it when you need operand type/value fields, all operands as rows, or the old scalar operand/decode helper shape in joinable form.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Instruction address |
-| `func_addr` | INT | Containing function |
-| `opnum` | INT | Operand index |
-| `text` | TEXT | Operand text |
-| `type_code` | INT | IDA operand type code |
-| `type_name` | TEXT | Operand type name (`reg`, `imm`, `near`, ...) |
-| `dtype` | INT | Operand dtype |
-| `reg` | INT | Register number when applicable |
-| `addr` | INT | Referenced address/displacement when applicable |
-| `raw_value` | INT | Raw operand value |
-| `value` | INT | Best-effort scalar operand value |
-
-```sql
--- Operand rows for one instruction
-SELECT opnum, text, type_name, value
-FROM instruction_operands
-WHERE address = 0x401000
-ORDER BY opnum;
-
--- Instruction details with normalized operands
-SELECT i.address, i.itype, i.mnemonic, i.size, o.opnum, o.text, o.type_name, o.value
-FROM instructions i
-LEFT JOIN instruction_operands o
-  ON o.address = i.address AND o.func_addr = 0x401000
-WHERE i.func_addr = 0x401000
-ORDER BY i.address, o.opnum;
-```
-
-**Performance:** `WHERE address = X` decodes one instruction; `WHERE func_addr = X` uses O(function_size) iteration. Without one of these constraints, it scans the entire database - SLOW.
+One row per decoded non-void operand. **Performance:** `WHERE address = X` decodes one instruction; `WHERE func_addr = X` uses O(function_size) iteration. Without one of these, the table scans everything. Schema, joinable patterns, and worked examples: see the `disassembly` skill.
 
 #### disasm_calls
 All call instructions with resolved targets and optional call-site prototype overrides.
@@ -726,20 +435,23 @@ UPDATE disasm_calls SET callee_type = NULL WHERE ea = 0x401234;
 
 ### Database Modification
 
-Most write examples are documented next to their tables (`breakpoints`, `segments`, `names`, `instructions`, `types*`, `bookmarks`, `comments`, `ctree_lvars`, `netnode_kv`).
+Most write examples are documented next to their tables (`breakpoints`, `segments`, `names`, `instructions`, `types*`, `applied_types`, `disasm_calls`, `dirtree_folders`, `bookmarks`, `comments`, `ctree_lvars`, `ctree_labels`, `netnode_kv`).
 Quick capability matrix:
 
 | Table | INSERT | UPDATE columns | DELETE |
 |-------|--------|---------------|--------|
-| `breakpoints` | Yes | `enabled`, `type`, `size`, `flags`, `pass_count`, `condition`, `group` | Yes |
-| `funcs` | Yes | `name`, `prototype`, `comment`, `rpt_comment`, `flags` | Yes |
-| `names` | Yes | `name` | Yes |
+| `breakpoints` | Yes | `enabled`, `type`, `size`, `flags`, `pass_count`, `condition`, `group`, `folder_path` | Yes |
+| `funcs` | Yes | `name`, `prototype`, `comment`, `rpt_comment`, `flags`, `folder_path` | Yes |
+| `names` | Yes | `name`, `folder_path` | Yes |
 | `comments` | Yes | `comment`, `rpt_comment` | Yes |
-| `bookmarks` | Yes | `description` | Yes |
+| `bookmarks` | Yes | `description`, `folder_path` | Yes |
 | `segments` | — | `name`, `class`, `perm` | Yes |
 | `instructions` | — | `operand0_format_spec` .. `operand7_format_spec` | Yes |
 | `bytes` | — | `value`, `word`, `dword`, `qword` | Yes (revert patch) |
-| `types` | Yes | Yes | Yes |
+| `types` | Yes | `name`, `folder_path`, plus type-table write columns | Yes |
+| `imports` | — | `folder_path` | — |
+| `local_type_bookmarks` | `ordinal`, `description` | `description`, `folder_path` | yes |
+| `dirtree_folders` | Yes (all standard dirtrees) | `path` rename/move | Yes, empty folders only |
 | `types_members` | Yes | Yes | Yes |
 | `types_enum_values` | Yes | Yes | Yes |
 | `applied_types` | Yes | `decl` | Yes |
@@ -747,14 +459,7 @@ Quick capability matrix:
 | `ctree_lvars` | — | `name`, `type`, `comment` | — |
 | `netnode_kv` | Yes | `value` | Yes |
 
-Write support is covered by integration/e2e tests in:
-- `tests/idasql/write_operations_phase3_test.cpp`
-- `tests/idasql/save_database_test.cpp`
-- `tests/idasql/breakpoints_table_test.cpp`
-- `tests/idasql/comments_table_test.cpp`
-- `tests/idasql/names_table_test.cpp`
-- `tests/idasql/bytes_table_test.cpp`
-- `tests/idasql/netnode_kv_table_test.cpp`
+Write support is covered by the project's integration and end-to-end test suite.
 
 Type/decompiler write examples:
 ```sql
@@ -828,111 +533,16 @@ SELECT save_database();
 **CRITICAL:** Always filter by `func_addr`. Without constraint, these tables will decompile EVERY function - extremely slow!
 
 #### pseudocode
-The `pseudocode` table is a structured line-by-line pseudocode with writable comments. **Use `decompile(addr)` to view pseudocode; use this table only for surgical edits (comments) or structured queries.**
-
-| Column | Type | Writable | Description |
-|--------|------|----------|-------------|
-| `func_addr` | INT | No | Function address |
-| `line_num` | INT | No | Line number |
-| `line` | TEXT | No | Pseudocode text |
-| `ea` | INT | No | Corresponding assembly address (from COLOR_ADDR anchor) |
-| `comment` | TEXT | **Yes** | Decompiler comment at this ea |
-| `comment_placement` | TEXT | **Yes** | Comment placement: `semi` (inline, default), `block1` (above line) |
-
-Filter behavior:
-- `WHERE func_addr = X`: best performance; iterates pseudocode for one function only.
-- `WHERE ea = X`: decompiles only the containing function and returns matching lines for that EA.
-- `WHERE line_num = N`: scans functions and returns rows at that line index; use only when you need cross-function line alignment.
-
-**Comment placements:** `semi` (after `;`), `block1` (own line above), `block2`, `curly1`, `curly2`, `colon`, `case`, `else`, `do`
-
-```sql
--- VIEWING: Use decompile() function, NOT the pseudocode table
-SELECT decompile(0x401000);
-
--- COMMENTING: inspect anchors first; do not assume ea == func_addr
-SELECT line_num, ea, line, comment
-FROM pseudocode
-WHERE func_addr = 0x401000
-ORDER BY line_num;
-
--- Use pseudocode table to add/edit/delete comments.
--- The example updates below assume 0x401020 is an already resolved writable
--- non-brace anchor, not a guessed function-entry row.
--- Add inline comment (appears after semicolon)
-UPDATE pseudocode SET comment = 'buffer overflow here'
-WHERE func_addr = 0x401000 AND ea = 0x401020;
-
--- Add block comment (appears on own line above the statement)
-UPDATE pseudocode SET comment_placement = 'block1', comment = 'vulnerable call'
-WHERE func_addr = 0x401000 AND ea = 0x401020;
-
--- Delete a comment at a resolved anchor
--- Warning: comment = NULL currently clears all placements at that ea.
-UPDATE pseudocode SET comment = NULL
-WHERE func_addr = 0x401000 AND ea = 0x401020;
-
--- STRUCTURED QUERY: Get specific lines with ea and comment info
-SELECT ea, line, comment FROM pseudocode WHERE func_addr = 0x401000;
-```
+Structured line-by-line pseudocode with writable comments. **Use `decompile(addr)` to view pseudocode; use this table only for surgical comment edits or structured line queries.** Writable columns: `comment`, `comment_placement` (placements: `semi`, `block1`, `block2`, `curly1`, `curly2`, `colon`, `case`, `else`, `do`). Filter by `func_addr` (fast) or `ea` (decompiles the containing function). Schema, comment-anchor resolution patterns, and write recipes: see the `decompiler` skill (with the `annotations` skill for the comment-mutation loop).
 
 #### ctree
-Full Abstract Syntax Tree of decompiled code.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Function address |
-| `item_id` | INT | Unique node ID |
-| `is_expr` | INT | 1=expression, 0=statement |
-| `op_name` | TEXT | Node type (`cot_call`, `cit_if`, etc.) |
-| `ea` | INT | Address in binary |
-| `parent_id` | INT | Parent node ID |
-| `depth` | INT | Tree depth |
-| `x_id`, `y_id`, `z_id` | INT | Child node IDs |
-| `var_idx` | INT | Local variable index |
-| `var_name` | TEXT | Variable name |
-| `obj_ea` | INT | Target address |
-| `obj_name` | TEXT | Symbol name |
-| `num_value` | INT | Numeric literal |
-| `str_value` | TEXT | String literal |
+Full AST of decompiled code. Filter `WHERE func_addr = X`. Schema (15 columns including parent/child IDs, op_name, obj/num/str values) and worked patterns: see the `decompiler` skill.
 
 #### ctree_lvars
-Local variables from decompilation.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Function address |
-| `idx` | INT | Variable index |
-| `name` | TEXT | Variable name |
-| `type` | TEXT | Type string |
-| `comment` | TEXT | Local-variable comment shown next to declaration |
-| `size` | INT | Size in bytes |
-| `is_arg` | INT | 1=function argument |
-| `is_stk_var` | INT | 1=stack variable |
-| `stkoff` | INT | Stack offset |
-
-Mutation guidance:
-- Prefer `idx`-based updates for deterministic writes.
-- `name` can be empty for internal/non-display temps; treat those as potentially non-nameable.
-- `comment` updates map to Hex-Rays local-variable comments (`lv.cmt`) and appear in `decompile(...)` output.
+Local variables from decompilation. Writable: `name`, `type`, `comment`. Filter by `func_addr`, key updates on `idx`. Schema, mutation guidance, and examples: see the `decompiler` skill.
 
 #### ctree_call_args
-Flattened call arguments for easy querying.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Function address |
-| `call_item_id` | INT | Call node ID |
-| `call_ea` | INT | Call-site EA used by hybrid ea+arg helpers |
-| `call_obj_name` | TEXT | Callee object name when call target is `cot_obj` |
-| `call_helper_name` | TEXT | Callee helper name when call target is `cot_helper` |
-| `arg_idx` | INT | Argument index (0-based) |
-| `arg_item_id` | INT | Argument expression item ID (`ctree.item_id`) |
-| `arg_op` | TEXT | Argument type |
-| `arg_var_name` | TEXT | Variable name if applicable |
-| `arg_var_is_stk` | INT | 1=stack variable |
-| `arg_num_value` | INT | Numeric value |
-| `arg_str_value` | TEXT | String value |
+Flattened call arguments for join-friendly querying. Columns: `func_addr`, `call_item_id`, `call_ea`, `call_obj_name`, `call_helper_name`, `arg_idx`, `arg_item_id`, `arg_op`, `arg_var_name`, `arg_var_is_stk`, `arg_num_value`, `arg_str_value`. See the `decompiler` skill.
 
 ### Decompiler Views
 
@@ -954,132 +564,27 @@ Pre-built views for common patterns:
 
 #### ctree_v_returns
 
-Return statements with details about what's being returned.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Function address |
-| `item_id` | INT | Return statement item_id |
-| `ea` | INT | Address of return |
-| `return_op` | TEXT | Return value opcode (`cot_num`, `cot_var`, `cot_call`, etc.) |
-| `return_num` | INT | Numeric value (if `cot_num`) |
-| `return_str` | TEXT | String value (if `cot_str`) |
-| `return_var` | TEXT | Variable name (if `cot_var`) |
-| `returns_arg` | INT | 1 if returning a function argument |
-| `returns_call_result` | INT | 1 if returning result of another call |
-
-```sql
--- Functions that return 0
-SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
-WHERE return_op = 'cot_num' AND return_num = 0;
-
--- Functions that return -1 (error sentinel)
-SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
-WHERE return_op = 'cot_num' AND return_num = -1;
-
--- Functions that return their argument (pass-through)
-SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
-WHERE returns_arg = 1;
-```
+Return statements with classification (`return_op`, `return_num`, `return_str`, `return_var`, `returns_arg`, `returns_call_result`). Filter by `func_addr`. Worked patterns (return-zero, error-sentinel, pass-through): see the `decompiler` skill.
 
 ### Type Tables
 
 #### types
-
-All local type definitions. Supports INSERT (create struct/union/enum), UPDATE, and DELETE.
-Integration/e2e coverage includes `tests/idasql/write_operations_phase3_test.cpp` and `tests/idasql/types_table_test.cpp`.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `ordinal` | INT | Type ordinal |
-| `name` | TEXT | Type name |
-| `size` | INT | Size in bytes |
-| `kind` | TEXT | struct/union/enum/typedef/func |
-| `is_struct` | INT | 1=struct |
-| `is_union` | INT | 1=union |
-| `is_enum` | INT | 1=enum |
-
-#### types_members
-Structure and union members. Supports INSERT (add member to struct/union), UPDATE, and DELETE.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `type_ordinal` | INT | Parent type ordinal |
-| `type_name` | TEXT | Parent type name |
-| `member_name` | TEXT | Member name |
-| `offset` | INT | Byte offset |
-| `size` | INT | Member size |
-| `member_type` | TEXT | Type string |
-| `mt_is_ptr` | INT | 1=pointer |
-| `mt_is_array` | INT | 1=array |
-| `mt_is_struct` | INT | 1=embedded struct |
-
-#### types_enum_values
-Enum constant values. Supports INSERT (add value to enum), UPDATE, and DELETE.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `type_ordinal` | INT | Enum type ordinal |
-| `type_name` | TEXT | Enum name |
-| `value_name` | TEXT | Constant name |
-| `value` | INT | Constant value |
-
-#### types_func_args
-Function prototype arguments with type classification.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `type_ordinal` | INT | Function type ordinal |
-| `type_name` | TEXT | Function type name |
-| `arg_index` | INT | Argument index (-1 = return type, 0+ = args) |
-| `arg_name` | TEXT | Argument name |
-| `arg_type` | TEXT | Argument type string |
-| `calling_conv` | TEXT | Calling convention (on return row only) |
-
-**Surface-level type classification** (literal type as written):
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `is_ptr` | INT | 1 if pointer type |
-| `is_int` | INT | 1 if exactly int type |
-| `is_integral` | INT | 1 if int-like (int, long, short, char, bool) |
-| `is_float` | INT | 1 if float/double |
-| `is_void` | INT | 1 if void |
-| `is_struct` | INT | 1 if struct/union |
-| `is_array` | INT | 1 if array |
-| `ptr_depth` | INT | Pointer depth (int** = 2) |
-| `base_type` | TEXT | Type with pointers stripped |
-
-**Resolved type classification** (after typedef resolution):
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `is_ptr_resolved` | INT | 1 if resolved type is pointer |
-| `is_int_resolved` | INT | 1 if resolved type is exactly int |
-| `is_integral_resolved` | INT | 1 if resolved type is int-like |
-| `is_float_resolved` | INT | 1 if resolved type is float/double |
-| `is_void_resolved` | INT | 1 if resolved type is void |
-| `ptr_depth_resolved` | INT | Pointer depth after resolution |
-| `base_type_resolved` | TEXT | Resolved type with pointers stripped |
+Local type definitions (structs, unions, enums, typedefs, funcs). Full CRUD: INSERT creates a struct/union/enum, UPDATE the `name` and `folder_path`, DELETE removes. `folder_path` is relative to the Local Types tree root; `full_path` is read-only. Columns + flag semantics: see the `types` skill.
 
 ```sql
--- Functions returning integers (strict: exactly int)
-SELECT type_name FROM types_func_args
-WHERE arg_index = -1 AND is_int = 1;
-
--- Functions returning integers (loose: includes BOOL, DWORD, LONG)
-SELECT type_name FROM types_func_args
-WHERE arg_index = -1 AND is_integral_resolved = 1;
-
--- Functions taking 4 pointer arguments
-SELECT type_name, COUNT(*) as ptr_args FROM types_func_args
-WHERE arg_index >= 0 AND is_ptr = 1
-GROUP BY type_ordinal HAVING ptr_args = 4;
-
--- Typedefs that hide pointers (HANDLE, etc.)
-SELECT type_name, arg_type FROM types_func_args
-WHERE is_ptr = 0 AND is_ptr_resolved = 1;
+INSERT INTO dirtree_folders(tree, path) VALUES ('local_types', 'idasql/types/recovered');
+UPDATE types SET folder_path = 'idasql/types/recovered' WHERE name = 'MY_HEADER';
+SELECT ordinal, name, folder_path FROM types WHERE folder_path LIKE 'idasql/types/%';
 ```
+
+#### types_members
+Struct/union members keyed by `type_ordinal`. Full CRUD. Columns + worked examples: see the `types` skill.
+
+#### types_enum_values
+Enum constant values keyed by `type_ordinal`. Full CRUD. Columns + examples: see the `types` skill.
+
+#### types_func_args
+Function prototype arguments with type classification. `arg_index = -1` is the return type; `arg_index >= 0` are positional args. Includes **surface-level** (`is_ptr`, `is_int`, `is_integral`, `is_float`, `is_void`, `is_struct`, `is_array`, `ptr_depth`, `base_type`) and **resolved** (`*_resolved` after typedef expansion) classification columns. Full schema and worked examples (integer-returners loose vs strict, pointer-args grouping, typedef-hidden pointers): see the `types` skill.
 
 #### applied_types
 Applied C declarations at mapped addresses. Use this to read, apply, replace, or clear function/data type information.
@@ -1128,221 +633,56 @@ Convenience views for filtering types:
 ### Extended Tables
 
 #### bytes
-Pure mapped-byte program view with patch support. This table is one row per
-mapped byte address; IDA item metadata such as size/type belongs to `heads`.
-
-| Column | Type | RW | Description |
-|--------|------|----|-------------|
-| `ea` | INT | R | Byte address |
-| `value` | INT | RW | Current byte value (UPDATE patches 1 byte) |
-| `word` | INT | RW | 2-byte LE value (UPDATE patches 2 bytes) |
-| `dword` | INT | RW | 4-byte LE value (UPDATE patches 4 bytes) |
-| `qword` | INT | RW | 8-byte LE value (UPDATE patches 8 bytes) |
-| `original_value` | INT | R | Original byte value before patch |
-| `is_patched` | INT | R | 1 if byte differs from original |
-| `fpos` | INT | R | Physical/input file offset (NULL when unavailable) |
-
-Patch via UPDATE (single or width columns), enumerate patches via
-`WHERE is_patched = 1` (fast — backed by IDA's patch list), revert via DELETE.
-
-```sql
--- Read one address
-SELECT ea, value, original_value, is_patched
-FROM bytes WHERE ea = 0x401000;
-
--- Read a byte range, including item-tail bytes
-SELECT ea, value
-FROM bytes
-WHERE ea >= 0x401000 AND ea < 0x401010
-ORDER BY ea;
-
--- Get item metadata separately
-SELECT address, size, type, flags, disasm
-FROM heads
-WHERE address = 0x401000;
-
--- Patch via table update (single byte, or width columns word/dword/qword)
-UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
-UPDATE bytes SET dword = 0x90909090 WHERE ea = 0x401000;  -- little-endian
-
--- Inspect patch inventory (fast: backed by IDA's patch list)
-SELECT printf('0x%X', ea) AS ea,
-       printf('0x%02X', original_value) AS old,
-       printf('0x%02X', value) AS new
-FROM bytes WHERE is_patched = 1 ORDER BY ea;
-
--- Revert: one byte, a range, or every patch
-DELETE FROM bytes WHERE ea = 0x401000;
-DELETE FROM bytes WHERE is_patched = 1;
-
--- Persist once done
-SELECT save_database();
-```
+Pure mapped-byte program view with patch support. One row per mapped
+byte address. Writable: `value`, `word`, `dword`, `qword` (little-
+endian patches). Hidden inputs `start_ea` and `n` pair up for bounded
+reads of N consecutive bytes (`SELECT hex(blob_concat(value)) FROM
+bytes WHERE start_ea = X AND n = N ORDER BY ea`). `start_ea` is
+deliberately a separate hidden column from the visible `ea` so any
+user predicate on `ea` (joins, compound `WHERE`) stays enforceable.
+`WHERE is_patched = 1` enumerates patches fast. DELETE reverts a
+patch. Item metadata (size/type/flags/disasm) lives in `heads`. Read
+shapes: see `data`; patch workflow: see `debugger`.
 
 #### bookmarks
-User-defined bookmarks/marked positions. Supports INSERT, UPDATE (`description`), and DELETE.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `index` | INT | Bookmark index |
-| `address` | INT | Bookmarked address |
-| `description` | TEXT | Bookmark description |
-
-```sql
--- List all bookmarks
-SELECT printf('0x%X', address) as addr, description FROM bookmarks;
-
--- Add bookmark
-INSERT INTO bookmarks (address, description) VALUES (0x401000, 'interesting branch');
-
--- Update bookmark description
-UPDATE bookmarks SET description = 'confirmed branch' WHERE index = 0;
-
--- Delete bookmark
-DELETE FROM bookmarks WHERE index = 0;
-```
+User-defined bookmarks. Full CRUD on `description` keyed by `slot`; writable `folder_path` organizes IDA-place bookmarks and `full_path` is read-only. See the `annotations` skill.
 
 #### netnode_kv
-Persistent key-value store backed by IDA netnodes. Data is saved inside the IDB automatically. Supports full CRUD and O(1) key lookup via `WHERE key = '...'`.
-
-| Column | Type | Writable | Description |
-|--------|------|----------|-------------|
-| `key` | TEXT | — | Unique key (identity, read-only) |
-| `value` | TEXT | Yes | Arbitrary-length value (blob storage) |
-
-```sql
--- Store a value
-INSERT INTO netnode_kv(key, value) VALUES('author', 'alice');
-
--- Read by key (O(1) lookup)
-SELECT value FROM netnode_kv WHERE key = 'author';
-
--- List all entries
-SELECT * FROM netnode_kv;
-
--- Update a value
-UPDATE netnode_kv SET value = '2.0' WHERE key = 'version';
-
--- Delete an entry
-DELETE FROM netnode_kv WHERE key = 'author';
-```
+Persistent key-value store backed by IDA netnodes; saved inside the IDB automatically. Columns: `key` (RO PK), `value` (RW). Full CRUD; O(1) lookup via `WHERE key = '...'`. See the `storage` skill.
 
 #### heads
-All defined items (code/data heads) in the database.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Head address |
-| `size` | INT | Item size |
-| `flags` | INT | IDA flags |
-
-**Performance:** `WHERE address = X` and address range filters are optimized. Next/previous navigation should use `ORDER BY address [DESC] LIMIT 1`; broad scans can still be large.
+All defined items (code/data heads). Columns: `address`, `size`, `flags`. `WHERE address = X` and range filters are optimized; next/previous navigation uses `ORDER BY address [DESC] LIMIT 1`. Schema in `disassembly/references/disassembly-tables.md`.
 
 #### fixups
-Relocation and fixup information.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Fixup address |
-| `type` | INT | Fixup type |
-| `target` | INT | Target address |
+Relocation/fixup rows. Columns: `address`, `type`, `target`. See `disassembly/references/disassembly-tables.md`.
 
 #### hidden_ranges
-Collapsed/hidden code regions in IDA.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `start_ea` | INT | Range start |
-| `end_ea` | INT | Range end |
-| `description` | TEXT | Description |
-| `visible` | INT | Visibility state |
+Collapsed/hidden code regions. Columns: `start_ea`, `end_ea`, `description`, `visible`. See `disassembly/references/disassembly-tables.md`.
 
 #### problems
-IDA analysis problems and warnings.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Problem address |
-| `type` | INT | Problem type code |
-| `description` | TEXT | Problem description |
-
-```sql
--- Find all analysis problems
-SELECT printf('0x%X', address) as addr, description FROM problems;
-```
+IDA analysis problems/warnings. Columns: `address`, `type`, `description`. See `disassembly/references/disassembly-tables.md`.
 
 #### fchunks
-Function chunks (for functions with non-contiguous code, like exception handlers).
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Parent function |
-| `start_ea` | INT | Chunk start |
-| `end_ea` | INT | Chunk end |
-| `size` | INT | Chunk size |
-
-```sql
--- Functions with multiple chunks (complex control flow)
-SELECT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name, COUNT(*) as chunks
-FROM fchunks GROUP BY func_addr HAVING chunks > 1;
-```
+Function chunks (non-contiguous code, e.g. exception handlers). Columns: `func_addr`, `start_ea`, `end_ea`, `size`. See `disassembly/references/disassembly-tables.md`.
 
 #### signatures
-FLIRT signature matches.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Matched address |
-| `name` | TEXT | Signature name |
-| `library` | TEXT | Library name |
+FLIRT signature matches. Columns: `address`, `name`, `library`. See `disassembly/references/disassembly-tables.md`.
 
 #### mappings
-Memory mappings for debugging.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `from_ea` | INT | Mapped from |
-| `to_ea` | INT | Mapped to |
-| `size` | INT | Mapping size |
+Memory mappings for debugging. Columns: `from_ea`, `to_ea`, `size`. See `disassembly/references/disassembly-tables.md`.
 
 ### Metadata Tables
 
 #### db_info
-Database-level metadata.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `key` | TEXT | Metadata key |
-| `value` | TEXT | Metadata value |
-
-```sql
--- Get database info
-SELECT * FROM db_info;
-```
+Database-level metadata as `key`/`value` rows. See `disassembly/references/disassembly-tables.md`.
 
 #### ida_info
-IDA processor and analysis info.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `key` | TEXT | Info key |
-| `value` | TEXT | Info value |
-
-```sql
--- Get processor type
-SELECT value FROM ida_info WHERE key = 'procname';
-```
+IDA processor and analysis info as `key`/`value` rows (e.g. `key = 'procname'`). See `disassembly/references/disassembly-tables.md`.
 
 ### Disassembly Tables
 
 #### disasm_loops
-Detected loops in disassembly.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `func_addr` | INT | Function address |
-| `loop_start` | INT | Loop header address |
-| `loop_end` | INT | Loop end address |
+Detected loops in disassembly. Columns: `func_addr`, `loop_start`, `loop_end`. Filter `WHERE func_addr = X`. See `disassembly/references/disassembly-tables.md`.
 
 ### Disassembly Views
 
@@ -1418,24 +758,44 @@ WHERE func_addr = 0x401000 AND mnemonic = 'call';
 ```
 
 ### Byte Access and Patching
-Reads use the `bytes(addr, n)` / `bytes_raw(addr, n)` scalars; **all patching is
-done through the writable `bytes` table** (UPDATE to patch, DELETE to revert).
-There are no `patch_*` / `revert_byte` / `get_original_byte` scalar functions —
-use the table columns instead.
+**All byte access — reads and patches — is done through the `bytes` table.**
+Reads use the bounded shape `WHERE start_ea = X AND n = N` (or a two-sided
+`WHERE ea BETWEEN A AND B`); writes use UPDATE; reverts use DELETE. There
+are no `bytes(addr, n)` / `bytes_raw(addr, n)` scalars, and no `patch_*` /
+`revert_byte` / `get_original_byte` either — the table is the single source
+of truth.
+
+The hidden `start_ea` + `n` columns pair up to request exactly N consecutive
+bytes from X. They are deliberately distinct from the visible `ea` column
+so any user predicate on `ea` (e.g. inside a JOIN) stays enforceable by
+SQLite. `blob_concat(value)` is a libxsql aggregate that assembles row
+values into one BLOB; `hex()` is the SQLite built-in BLOB→hex helper.
 
 | Operation | SQL |
 |-----------|-----|
-| Read hex | `SELECT bytes(addr, n)` |
-| Read BLOB | `SELECT bytes_raw(addr, n)` |
+| Read 1 byte | `SELECT value FROM bytes WHERE ea = addr` |
+| Read N bytes as hex | `SELECT hex(blob_concat(value)) FROM bytes WHERE start_ea = addr AND n = N ORDER BY ea` |
+| Read N bytes as BLOB | `SELECT blob_concat(value) FROM bytes WHERE start_ea = addr AND n = N ORDER BY ea` |
+| Read a range | `SELECT value FROM bytes WHERE ea >= A AND ea < B ORDER BY ea` |
 | Patch 1 byte | `UPDATE bytes SET value = v WHERE ea = addr` |
 | Patch 2/4/8 bytes (LE) | `UPDATE bytes SET word\|dword\|qword = v WHERE ea = addr` |
 | Original byte | `SELECT original_value FROM bytes WHERE ea = addr` |
 | List patches (fast) | `SELECT ea FROM bytes WHERE is_patched = 1` |
 | Revert one / all | `DELETE FROM bytes WHERE ea = addr` / `WHERE is_patched = 1` |
 
+**Unbounded-range warning:** `WHERE ea > X` *without* an upper bound or
+`LIMIT` walks every mapped byte from X to end-of-image — millions of rows,
+seconds of wall time. Always pair the read with one of `start_ea = X AND
+n = N`, `AND ea < B`, or an outer `LIMIT`.
+
 ```sql
--- Read bytes
-SELECT bytes(0x401000, 16);
+-- Read 16 bytes as hex
+SELECT hex(blob_concat(value))
+FROM bytes WHERE start_ea = 0x401000 AND n = 16 ORDER BY ea;
+
+-- Read 64 bytes as BLOB
+SELECT blob_concat(value)
+FROM bytes WHERE start_ea = 0x401000 AND n = 64 ORDER BY ea;
 
 -- Patch one byte (example: NOP) and a 4-byte little-endian value
 UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
@@ -1596,7 +956,7 @@ LIMIT 1;
 ```
 
 ### Comments
-Read address comments through the `comments` table. To preserve the old scalar lookup shape, use a scalar subquery with regular comments first and repeatable comments as fallback:
+Read address comments through the `comments` table. For a single-query "comment-or-rpt_comment" lookup, use a scalar subquery with COALESCE:
 
 ```sql
 SELECT (
@@ -1659,7 +1019,7 @@ Notes:
 ### Context Awareness (Plugin UI)
 | Function | Description |
 |----------|-------------|
-| `get_ui_context_json()` | Return current UI/widget/context JSON for context-aware prompts (plugin-only; executes through the same queued main-thread path and timeout behavior as other SQL functions) |
+| `get_ui_context_json()` | Return current UI/widget/context JSON for context-aware prompts (registered everywhere; real UI state in the GUI plugin, a `source:"cli"` stub under idalib/CLI; in the plugin executes through the same queued main-thread path and timeout behavior as other SQL functions) |
 
 ```sql
 SELECT get_ui_context_json();
@@ -3011,7 +2371,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Instruction analysis | `instructions WHERE func_addr = X` |
 | View function disassembly | `disasm_func(addr)` or `disasm_range(start, end)` |
 | View decompiled code | `decompile(addr)` |
-| UI/screen context questions | `get_ui_context_json()` (plugin UI only) |
+| UI/screen context questions | `get_ui_context_json()` (live UI in the GUI plugin; CLI returns a stub) |
 | Edit decompiler comments | `Resolve writable pseudocode anchor, then UPDATE pseudocode SET comment = '...' WHERE func_addr = X AND ea = Y` |
 | AST pattern matching | `ctree WHERE func_addr = X` |
 | Call patterns | `ctree_v_calls`, `disasm_calls` |
@@ -3052,14 +2412,14 @@ Standard REST API that works with curl, any HTTP client, or LLM tools.
 
 **Starting the server:**
 ```bash
-# Default port 8081
+# Default port 8080
 idasql -s database.i64 --http
 
 # Custom port and bind address
 idasql -s database.i64 --http 9000 --bind 0.0.0.0
 
 # With authentication
-idasql -s database.i64 --http 8081 --token mysecret
+idasql -s database.i64 --http 8080 --token mysecret
 ```
 
 **HTTP Endpoints:**
@@ -3077,18 +2437,18 @@ idasql -s database.i64 --http 8081 --token mysecret
 **Example with curl:**
 ```bash
 # Get API documentation
-curl http://localhost:8081/help
+curl http://localhost:8080/help
 
 # Execute SQL query
-curl -X POST http://localhost:8081/query -d "SELECT name, size FROM funcs LIMIT 5"
+curl -X POST http://localhost:8080/query -d "SELECT name, size FROM funcs LIMIT 5"
 
 # With authentication
-curl -X POST http://localhost:8081/query \
+curl -X POST http://localhost:8080/query \
      -H "Authorization: Bearer mysecret" \
      -d "SELECT * FROM funcs"
 
 # Check status
-curl http://localhost:8081/status
+curl http://localhost:8080/status
 ```
 
 **Response Format (JSON):**

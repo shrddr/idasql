@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "ida_headers.hpp"
+#include "widget_catalog.hpp"  // BWN_* classification, widget_category(), widget_canonical_name(), ...
 
+#include <xsql/database.hpp>
 #include <xsql/json.hpp>
 #include "idapython_exec.hpp"
 #include <idasql/string_utils.hpp>
@@ -228,60 +230,10 @@ print("__IDASQL_UI_CTX__" + str(snapshot))
 static std::mutex g_capture_mutex;
 static bool g_helper_installed = false;
 
-static bool is_custom_view_widget_type(twidget_type_t widget_type) {
-    return widget_type == BWN_DISASM ||
-           widget_type == BWN_HEXVIEW ||
-           widget_type == BWN_PSEUDOCODE ||
-           widget_type == BWN_TILIST;
-}
-
-static bool is_address_widget_type(twidget_type_t widget_type) {
-    return widget_type == BWN_DISASM ||
-           widget_type == BWN_HEXVIEW ||
-           widget_type == BWN_PSEUDOCODE;
-}
-
-static bool is_chooser_like_widget_type(twidget_type_t widget_type) {
-    bool is_chooser_like = is_chooser_widget(widget_type) ||
-                           widget_type == BWN_FUNCS ||
-                           widget_type == BWN_NAMES ||
-                           widget_type == BWN_IMPORTS ||
-                           widget_type == BWN_BPTS;
-#ifdef BWN_TITREE
-    is_chooser_like = is_chooser_like || widget_type == BWN_TITREE;
-#endif
-    return is_chooser_like;
-}
-
-static const char* widget_type_name(twidget_type_t widget_type) {
-    switch (widget_type) {
-        case BWN_DISASM: return "BWN_DISASM";
-        case BWN_HEXVIEW: return "BWN_HEXVIEW";
-        case BWN_PSEUDOCODE: return "BWN_PSEUDOCODE";
-        case BWN_TILIST: return "BWN_TILIST";
-        case BWN_OUTPUT: return "BWN_OUTPUT";
-        case BWN_CLI: return "BWN_CLI";
-        case BWN_FUNCS: return "BWN_FUNCS";
-        case BWN_NAMES: return "BWN_NAMES";
-        case BWN_IMPORTS: return "BWN_IMPORTS";
-        case BWN_BPTS: return "BWN_BPTS";
-#ifdef BWN_TITREE
-        case BWN_TITREE: return "BWN_TITREE";
-#endif
-        default: break;
-    }
-    return nullptr;
-}
-
-static std::string widget_type_name_or_unknown(twidget_type_t widget_type) {
-    const char* known = widget_type_name(widget_type);
-    if (known != nullptr) {
-        return known;
-    }
-    std::ostringstream out;
-    out << "UNKNOWN_" << static_cast<int>(widget_type);
-    return out.str();
-}
+// Widget-type classification (names, predicates, categories) is provided by
+// widget_catalog.hpp (included via ida_headers.hpp). The catalog lives in
+// namespace idasql::ui_context, so calls inside this anonymous namespace
+// resolve to it via ordinary name lookup.
 
 using idasql::format_ea_hex;
 
@@ -818,12 +770,17 @@ static void populate_code_context_json(const ContextSourceData& source, xsql::js
 static xsql::json build_ui_context_json(const ContextSourceData& source, const CaptureMetadata& capture) {
     const bool is_custom_view = source.has_widget && is_custom_view_widget_type(source.widget_type);
     const bool is_chooser_like = source.has_widget && is_chooser_like_widget_type(source.widget_type);
+    const bool is_address = source.has_widget && is_address_widget_type(source.widget_type);
 
     xsql::json type_id = nullptr;
     std::string type_name = "unknown";
+    std::string canonical_name = "unknown";
+    std::string category = widget_category_name(WidgetCategory::Unknown);
     if (source.has_widget) {
         type_id = static_cast<int>(source.widget_type);
         type_name = widget_type_name_or_unknown(source.widget_type);
+        canonical_name = widget_canonical_name(source.widget_type);
+        category = widget_category_name(widget_category(source.widget_type));
     }
 
     xsql::json result = {
@@ -837,15 +794,21 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
         {"focused_widget", {
             {"type_id", type_id},
             {"type_name", type_name},
+            {"canonical_name", canonical_name},
+            {"category", category},
             {"title", source.have_title ? source.widget_title : std::string()},
             {"is_custom_view", is_custom_view},
-            {"is_chooser_like", is_chooser_like}
+            {"is_chooser_like", is_chooser_like},
+            {"is_address", is_address}
         }},
         {"main_viewer", {
             {"type_id", type_id},
             {"type_name", type_name},
+            {"canonical_name", canonical_name},
+            {"category", category},
             {"title", source.have_title ? source.widget_title : std::string()},
-            {"is_custom_view", is_custom_view}
+            {"is_custom_view", is_custom_view},
+            {"is_address", is_address}
         }},
         {"code_context", xsql::json::object()},
         {"selection", nullptr}
@@ -917,6 +880,54 @@ xsql::json get_ui_context_json() {
     }
 
     return build_ui_context_json(source, capture);
+}
+
+namespace {
+
+// CLI/idalib has no IDA UI. Return the same top-level envelope shape as the
+// real provider (so clients don't break) but with machine-readable markers
+// (available=false, capture.source="cli") and a friendly message.
+xsql::json cli_unavailable_context_json() {
+    return {
+        {"available", false},
+        {"capture", {
+            {"source", "cli"},
+            {"fresh", false},
+            {"sequence", nullptr},
+            {"timestamp_ms", nullptr},
+            {"error",
+             "get_ui_context_json() reflects live IDA GUI state and is not "
+             "applicable in idasql CLI/idalib mode (no UI). Run inside the IDA "
+             "plugin to get real UI context."}
+        }},
+        {"focused_widget", nullptr},
+        {"main_viewer", nullptr},
+        {"code_context", xsql::json::object()},
+        {"selection", nullptr}
+    };
+}
+
+void sql_get_ui_context_json(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* /*argv*/) {
+    if (argc != 0) {
+        ctx.result_error("get_ui_context_json requires 0 arguments");
+        return;
+    }
+    // No UI under idalib/CLI — return the friendly stub instead of touching the
+    // GUI-only capture path.
+    if (idasql_is_ida_library()) {
+        ctx.result_text(cli_unavailable_context_json().dump());
+        return;
+    }
+    ctx.result_text(get_ui_context_json().dump());
+}
+
+} // namespace
+
+bool register_ui_context_sql_functions(xsql::Database& db) {
+    return xsql::is_ok(db.register_function(
+        "get_ui_context_json",
+        0,
+        xsql::ScalarFn(sql_get_ui_context_json)));
 }
 
 } // namespace ui_context

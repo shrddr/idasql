@@ -28,7 +28,8 @@
 #include <diskio.hpp>
 #include "address_resolution.hpp"
 #include "decompiler.hpp"
-#include "entities.hpp"
+#include "code.hpp"
+#include "core.hpp"
 #include "idapython_exec.hpp"
 #include <idasql/runtime_settings.hpp>
 
@@ -220,54 +221,6 @@ static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::Function
 // ============================================================================
 // Bytes Functions
 // ============================================================================
-
-// bytes(address, count) - Get bytes as hex string
-static void sql_bytes_hex(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("bytes requires 2 arguments (address, count)");
-        return;
-    }
-
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    size_t count = static_cast<size_t>(argv[1].as_int());
-    if (count > 4096) count = 4096;  // Safety limit
-
-    std::ostringstream result;
-    result << std::hex << std::setfill('0');
-    for (size_t i = 0; i < count; i++) {
-        if (i > 0) result << " ";
-        uchar byte = get_byte(ea + i);
-        result << std::setw(2) << static_cast<int>(byte);
-    }
-
-    std::string str = result.str();
-    ctx.result_text(str);
-}
-
-// bytes_raw(address, count) - Get bytes as blob
-static void sql_bytes_raw(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 2) {
-        ctx.result_error("bytes_raw requires 2 arguments (address, count)");
-        return;
-    }
-
-    ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
-        return;
-    }
-    size_t count = static_cast<size_t>(argv[1].as_int());
-    if (count > 4096) count = 4096;  // Safety limit
-
-    std::vector<uchar> data(count);
-    for (size_t i = 0; i < count; i++) {
-        data[i] = get_byte(ea + i);
-    }
-
-    ctx.result_blob(data.data(), static_cast<size_t>(data.size()));
-}
 
 // load_file_bytes(path, file_offset, address, size [, patchable])
 // Load bytes from a file into the IDB at the target address range.
@@ -1301,7 +1254,7 @@ static bool normalize_func_for_ea(ea_t requested_func_addr, ea_t target_ea, ea_t
 }
 
 static bool synthesize_numform_from_operand_representation(ea_t target_ea, int opnum, number_format_t& out_fmt) {
-    const std::string kind = entities::operand_repr_kind_text(target_ea, opnum);
+    const std::string kind = code::operand_repr_kind_text(target_ea, opnum);
     if (kind != "enum" && kind != "stroff") {
         return false;
     }
@@ -1315,25 +1268,25 @@ static bool synthesize_numform_from_operand_representation(ea_t target_ea, int o
     out_fmt.flags32 = static_cast<flags_t>(out_fmt.flags);
     out_fmt.props = static_cast<char>(NF_FIXED | NF_VALID);
     out_fmt.serial = 0;
-    out_fmt.type_name = entities::operand_repr_type_name_text(target_ea, opnum).c_str();
+    out_fmt.type_name = code::operand_repr_type_name_text(target_ea, opnum).c_str();
 
     if (kind == "enum") {
-        out_fmt.serial = static_cast<uchar>(entities::operand_enum_serial(target_ea, opnum));
+        out_fmt.serial = static_cast<uchar>(code::operand_enum_serial(target_ea, opnum));
     }
 
     return true;
 }
 
-static bool set_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int opnum, const entities::OperandApplyRequest& req) {
+static bool set_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int opnum, const code::OperandApplyRequest& req) {
     if (!decompiler::hexrays_available()) return false;
     if (opnum < 0 || opnum >= UA_MAXOP) return false;
-    if (req.kind == entities::OperandApplyKind::None) return true;  // Explicit no-op for empty spec.
+    if (req.kind == code::OperandApplyKind::None) return true;  // Explicit no-op for empty spec.
 
     ea_t func_addr = BADADDR;
     if (!normalize_func_for_ea(requested_func_addr, target_ea, func_addr)) return false;
 
     // Keep disassembly and decompiler layers consistent first.
-    if (!entities::apply_operand_representation(target_ea, opnum, req)) return false;
+    if (!code::apply_operand_representation(target_ea, opnum, req)) return false;
 
     user_numforms_t* numforms = nullptr;
     bool metadata_ok = false;
@@ -1348,7 +1301,7 @@ static bool set_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int
         const auto end = user_numforms_end(numforms);
         auto it = user_numforms_find(numforms, loc);
 
-        if (req.kind == entities::OperandApplyKind::Clear) {
+        if (req.kind == code::OperandApplyKind::Clear) {
             if (it != end) {
                 user_numforms_erase(numforms, it);
             }
@@ -1431,7 +1384,7 @@ static std::string numform_to_json(ea_t target_ea, int opnum, const number_forma
         {"valid", (nf.props & NF_VALID) != 0}
     };
     if (nf.is_stroff()) {
-        obj["delta"] = entities::operand_stroff_delta(target_ea, opnum);
+        obj["delta"] = code::operand_stroff_delta(target_ea, opnum);
     } else {
         obj["delta"] = 0;
     }
@@ -1778,8 +1731,8 @@ static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
     int opnum = argv[2].as_int();
     const char* spec = argv[3].is_null() ? "" : argv[3].as_c_str();
 
-    entities::OperandApplyRequest req;
-    if (!entities::parse_operand_apply_spec(spec, req)) {
+    code::OperandApplyRequest req;
+    if (!code::parse_operand_apply_spec(spec, req)) {
         ctx.result_error("invalid numform spec (expected clear|enum:<name>[,serial=n]|stroff:<type[/nested]>[,delta=n])");
         return;
     }
@@ -1809,8 +1762,8 @@ static void sql_set_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    entities::OperandApplyRequest req;
-    if (!entities::parse_operand_apply_spec(spec, req)) {
+    code::OperandApplyRequest req;
+    if (!code::parse_operand_apply_spec(spec, req)) {
         ctx.result_error("invalid numform spec (expected clear|enum:<name>[,serial=n]|stroff:<type[/nested]>[,delta=n])");
         return;
     }
@@ -1839,8 +1792,8 @@ static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
     const char* spec = argv[4].is_null() ? "" : argv[4].as_c_str();
     const char* callee = (argc >= 6 && !argv[5].is_null()) ? argv[5].as_c_str() : "";
 
-    entities::OperandApplyRequest req;
-    if (!entities::parse_operand_apply_spec(spec, req)) {
+    code::OperandApplyRequest req;
+    if (!code::parse_operand_apply_spec(spec, req)) {
         ctx.result_error("invalid numform spec (expected clear|enum:<name>[,serial=n]|stroff:<type[/nested]>[,delta=n])");
         return;
     }
@@ -1882,8 +1835,8 @@ static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
     const bool nth_explicit = (argc >= 6);
     const int nth = nth_explicit ? argv[5].as_int() : 0;
 
-    entities::OperandApplyRequest req;
-    if (!entities::parse_operand_apply_spec(spec, req)) {
+    code::OperandApplyRequest req;
+    if (!code::parse_operand_apply_spec(spec, req)) {
         ctx.result_error("invalid numform spec (expected clear|enum:<name>[,serial=n]|stroff:<type[/nested]>[,delta=n])");
         return;
     }
@@ -2168,7 +2121,7 @@ static void sql_rebuild_strings(xsql::FunctionContext& ctx, int argc, xsql::Func
     build_strlist();
 
     // Invalidate the strings virtual table cache so queries see new data
-    entities::TableRegistry::invalidate_strings_cache_global();
+    core::CoreRegistry::invalidate_strings_cache_global();
 
     // Return the count
     size_t count = get_strlist_qty();
@@ -2201,9 +2154,9 @@ void register_sql_functions(xsql::Database& db) {
     db.register_function("make_code", 1, xsql::ScalarFn(sql_make_code));
     db.register_function("make_code_range", 2, xsql::ScalarFn(sql_make_code_range));
 
-    // Bytes
-    db.register_function("bytes", 2, xsql::ScalarFn(sql_bytes_hex));
-    db.register_function("bytes_raw", 2, xsql::ScalarFn(sql_bytes_raw));
+    // load_file_bytes writes a host file's bytes into the IDB at a given
+    // range. Bulk byte reads go through the bytes table (hidden `start_ea`
+    // + `n` input columns).
     db.register_function("load_file_bytes", 4, xsql::ScalarFn(sql_load_file_bytes));
     db.register_function("load_file_bytes", 5, xsql::ScalarFn(sql_load_file_bytes));
 

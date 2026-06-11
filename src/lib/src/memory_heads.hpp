@@ -5,14 +5,25 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+/**
+ * entities_heads.hpp - `heads` generator table (defined items) + helpers.
+ */
+
 #pragma once
 
-#include <xsql/database.hpp>
+#include "core_common.hpp"
 
 namespace idasql {
-namespace plugin_functions {
+namespace memory {
 
-bool register_ui_context_sql_functions(xsql::Database& db);
+struct HeadRow {
+  ea_t ea = BADADDR;
+};
 
-} // namespace plugin_functions
+void collect_head_rows(std::vector<HeadRow> &rows);
+const char *get_item_type_str(ea_t ea);
+
+GeneratorTableDef<HeadRow> define_heads();
+
+} // namespace memory
 } // namespace idasql

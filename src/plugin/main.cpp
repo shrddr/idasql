@@ -46,6 +46,7 @@
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
+#include <auto.hpp>
 #include <idasql/database.hpp>
 #include <idasql/idapython.hpp>
 #include <idasql/ui_context_provider.hpp>
@@ -54,6 +55,7 @@
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
+#include <auto.hpp>
 #include <idasql/database.hpp>
 #include <idasql/idapython.hpp>
 #include <idasql/ui_context_provider.hpp>
@@ -63,9 +65,16 @@
 // IDASQL CLI (command line interface)
 #include "../common/idasql_cli.hpp"
 
+// Autostart pins (.pin command + auto-launch on database open)
+#include "../common/pin_commands.hpp"
+#include <idasql/autostart_pin.hpp>
+
 // Plugin control codes
 #include "../common/plugin_control.hpp"
-#include "ui_context_function.hpp"
+
+// Cross-SDK shims (idasql_is_ida_library). Lib-internal header; included here
+// after the IDA SDK headers above so its inline wrappers resolve.
+#include "../lib/src/ida_compat.hpp"
 
 // Version info
 #include "../common/idasql_version.hpp"
@@ -202,9 +211,8 @@ struct idasql_plugmod_t : public plugmod_t
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
         if (engine_->is_valid()) {
-            if (!idasql::plugin_functions::register_ui_context_sql_functions(engine_->database())) {
-                msg("IDASQL: Failed to register get_ui_context_json()\n");
-            }
+            // get_ui_context_json() is now registered by QueryEngine::init()
+            // for every runtime (real here in the plugin, a stub under CLI).
             msg("IDASQL v" IDASQL_VERSION_STRING ": Query engine initialized\n");
 
             std::string py_capture_error;
@@ -274,9 +282,28 @@ struct idasql_plugmod_t : public plugmod_t
                 }
             };
 
+            // Wire the .pin command (read/write autostart pins in the IDB).
+            idasql::wire_pin_callbacks(cli_->session().callbacks());
+
             // Auto-install CLI so it's available immediately
             // User can still toggle it off with run(23) if desired
             cli_->install();
+
+            // Honor pinned autostart preferences for this IDB. This is the
+            // plugin-only half of the .pin feature: the CLI never auto-launches
+            // on open. start_*_server() is non-blocking here and no-ops if a
+            // server is already running.
+            idasql::autostart::PinConfig pin = idasql::autostart::load();
+            if (pin.http.enabled && pin.http.port) {
+                msg("IDASQL: autostart -> %s\n",
+                    start_http_server(pin.http.port, pin.http.host).c_str());
+            }
+#ifdef IDASQL_HAS_MCP
+            if (pin.mcp.enabled && pin.mcp.port) {
+                msg("IDASQL: autostart -> %s\n",
+                    start_mcp_server(pin.mcp.port, pin.mcp.host).c_str());
+            }
+#endif
         } else {
             msg("IDASQL: Failed to init engine: %s\n", engine_->error().c_str());
         }
@@ -289,6 +316,16 @@ struct idasql_plugmod_t : public plugmod_t
             return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
         }
 
+        // With no explicit port, fall back to the pinned host/port if one is set.
+        std::string addr = bind_addr;
+        if (req_port == 0) {
+            idasql::autostart::PinConfig pin = idasql::autostart::load();
+            if (pin.mcp.port != 0) {
+                req_port = pin.mcp.port;
+                addr = pin.mcp.host;
+            }
+        }
+
         // SQL executor that uses execute_sync for thread safety
         auto sql_executor = [this](const std::string& sql) -> std::string {
             xsql::ScriptResult result = run_query_script_sync(sql);
@@ -296,7 +333,7 @@ struct idasql_plugmod_t : public plugmod_t
         };
 
         // Start MCP server
-        int port = mcp_server_.start(req_port, sql_executor, bind_addr);
+        int port = mcp_server_.start(req_port, sql_executor, addr);
         if (port <= 0) {
             return "Error: Failed to start MCP server";
         }
@@ -311,6 +348,16 @@ struct idasql_plugmod_t : public plugmod_t
             return idasql::format_http_status(http_server_.port(), true, http_server_.bind_addr());
         }
 
+        // With no explicit port, fall back to the pinned host/port if one is set.
+        std::string addr = bind_addr;
+        if (req_port == 0) {
+            idasql::autostart::PinConfig pin = idasql::autostart::load();
+            if (pin.http.port != 0) {
+                req_port = pin.http.port;
+                addr = pin.http.host;
+            }
+        }
+
         // SQL executor that uses execute_sync for thread safety and returns JSON
         idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
             xsql::ScriptResult result = run_query_script_sync(sql);
@@ -318,7 +365,7 @@ struct idasql_plugmod_t : public plugmod_t
         };
 
         // Start HTTP server, no queue (plugin mode)
-        int port = http_server_.start(req_port, sql_cb, bind_addr);
+        int port = http_server_.start(req_port, sql_cb, addr);
         if (port <= 0) {
             return "Error: Failed to start HTTP server";
         }
@@ -385,15 +432,9 @@ struct idasql_plugmod_t : public plugmod_t
 
 static plugmod_t* idaapi init()
 {
-    // Skip loading when running under idalib (e.g., idasql CLI).
-    // is_ida_library() gained default arguments in SDK 9.2. On older SDKs
-    // all three args are required. See lib/src/ida_compat.hpp for the rest
-    // of the cross-version surface (this TU doesn't pull that header).
-#if IDA_SDK_VERSION >= 920
-    if (is_ida_library()) {
-#else
-    if (is_ida_library(nullptr, 0, nullptr)) {
-#endif
+    // Skip loading when running under idalib (e.g., idasql CLI). The SDK
+    // version guard lives in idasql_is_ida_library() (ida_compat.hpp).
+    if (idasql_is_ida_library()) {
         msg("IDASQL: Running under idalib, plugin skipped\n");
         return nullptr;
     }

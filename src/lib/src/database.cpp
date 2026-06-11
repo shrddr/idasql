@@ -16,16 +16,16 @@
 #include "ida_headers.hpp"
 
 // Private headers for registry implementations
-#include "entities.hpp"
+#include "core.hpp"
 #include "entities_ext.hpp"
 #include "entities_dbg.hpp"
 #include "entities_search.hpp"
-#include "entities_types.hpp"
 #include "functions.hpp"
 #include "decompiler.hpp"
-#include "disassembly.hpp"
+#include "types.hpp"
 #include "search_bytes.hpp"
 #include "metadata.hpp"
+#include <idasql/ui_context_provider.hpp>
 
 namespace idasql {
 
@@ -384,17 +384,14 @@ void QueryEngine::init() {
     // db_ auto-opens :memory: via xsql::Database constructor
 
     // Register all virtual tables
-    entities_ = std::make_unique<entities::TableRegistry>();
-    entities_->register_all(db_);
+    core_ = std::make_unique<core::CoreRegistry>();
+    core_->register_all(db_);
 
     metadata_ = std::make_unique<metadata::MetadataRegistry>();
     metadata_->register_all(db_);
 
     extended_ = std::make_unique<extended::ExtendedRegistry>();
     extended_->register_all(db_);
-
-    disassembly_ = std::make_unique<disassembly::DisassemblyRegistry>();
-    disassembly_->register_all(db_);
 
     types_ = std::make_unique<types::TypesRegistry>();
     types_->register_all(db_);
@@ -409,6 +406,10 @@ void QueryEngine::init() {
 
     functions::register_sql_functions(db_);
     search::register_byte_search(db_);
+
+    // get_ui_context_json(): registered for every runtime. Returns live UI
+    // state in the GUI plugin; a "not applicable" stub under idalib/CLI.
+    ui_context::register_ui_context_sql_functions(db_);
 }
 
 // ============================================================================

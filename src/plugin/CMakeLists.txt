@@ -5,11 +5,24 @@
 ida_add_plugin(idasql_plugin
     SOURCES
         main.cpp
-        ui_context_function.cpp
 )
 
 # Output as idasql.dll (not idasql_plugin.dll)
 set_target_properties(idasql_plugin PROPERTIES OUTPUT_NAME "idasql")
+
+# Co-locate the generated ida-plugin.json (produced by the parent CMakeLists via
+# configure_file from idasql_version.hpp) next to the plugin binary so it ships
+# with the plugin and CI can package it from the same directory.
+add_custom_command(TARGET idasql_plugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_BINARY_DIR}/ida-plugin.json"
+        "$<TARGET_FILE_DIR:idasql_plugin>/ida-plugin.json")
+
+# Windows VS_VERSION_INFO resource
+xsql_add_versioninfo(idasql_plugin
+    FILETYPE          VFT_DLL
+    DESCRIPTION       "idasql plugin for IDA Pro"
+    ORIGINAL_FILENAME "idasql.dll")
 
 # Include directories and link dependencies
 target_include_directories(idasql_plugin PRIVATE

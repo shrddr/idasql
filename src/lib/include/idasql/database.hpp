@@ -226,10 +226,9 @@ private:
     std::string error_;
 
     // Table registries (prevent dangling virtual table pointers)
-    std::unique_ptr<entities::TableRegistry> entities_;
+    std::unique_ptr<core::CoreRegistry> core_;
     std::unique_ptr<metadata::MetadataRegistry> metadata_;
     std::unique_ptr<extended::ExtendedRegistry> extended_;
-    std::unique_ptr<disassembly::DisassemblyRegistry> disassembly_;
     std::unique_ptr<types::TypesRegistry> types_;
     std::unique_ptr<debugger::DebuggerRegistry> debugger_;
     std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;
@@ -240,6 +239,12 @@ private:
 // ============================================================================
 // TIER 2: Session - Database lifecycle management
 // ============================================================================
+
+enum class OpenOutcome {
+    Ok,
+    Failed,
+    UpgradedReopenRequired
+};
 
 /**
  * Session - Manages THE IDA database session after runtime initialization
@@ -280,6 +285,26 @@ public:
      * @return true on success
      */
     bool open(const char* idb_path);
+
+    /**
+     * Result of the most recent open attempt.
+     */
+    OpenOutcome open_outcome() const { return open_outcome_; }
+
+    /**
+     * Path to the generated .i64 when open_outcome() is UpgradedReopenRequired.
+     */
+    const std::string& upgraded_i64_path() const { return upgraded_i64_path_; }
+
+    /**
+     * Path to the idalib upgrade log when open_outcome() is UpgradedReopenRequired.
+     */
+    const std::string& upgrade_log_path() const { return upgrade_log_path_; }
+
+    /**
+     * One-line notice for non-fatal open redirects, such as .idb -> existing .i64.
+     */
+    const std::string& open_notice() const { return open_notice_; }
 
     /**
      * Close the session
@@ -332,6 +357,10 @@ private:
     std::unique_ptr<QueryEngine> engine_;
     bool ida_opened_ = false;
     std::string error_;
+    OpenOutcome open_outcome_ = OpenOutcome::Failed;
+    std::string upgraded_i64_path_;
+    std::string upgrade_log_path_;
+    std::string open_notice_;
 };
 
 // ============================================================================

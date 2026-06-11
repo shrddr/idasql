@@ -31,10 +31,13 @@
 #include <windows.h>
 #endif
 
+#include <xsql/json.hpp>
 #include <xsql/query_script.hpp>
 #include <xsql/thinclient/server.hpp>
 #include "../common/http_server.hpp"
 #include "../common/idasql_commands.hpp"
+#include "../common/pin_commands.hpp"
+#include <idasql/autostart_pin.hpp>
 #include "../common/json_utils.hpp"
 #include "../common/sql_script.hpp"
 #include "../common/welcome_query.hpp"
@@ -292,6 +295,16 @@ static void run_repl(idasql::Database& db) {
                     g_mcp_server = std::make_unique<idasql::IDAMCPServer>();
                 }
 
+                // With no explicit port, fall back to the pinned host/port.
+                std::string addr = bind_addr;
+                if (req_port == 0) {
+                    idasql::autostart::PinConfig pin = idasql::autostart::load();
+                    if (pin.mcp.port != 0) {
+                        req_port = pin.mcp.port;
+                        addr = pin.mcp.host;
+                    }
+                }
+
                 // SQL executor - will be called on main thread via wait()
                 idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
                     auto result = idasql::run_sql_script(db, sql);
@@ -299,7 +312,7 @@ static void run_repl(idasql::Database& db) {
                 };
 
                 // Start with use_queue=true for CLI mode (main thread execution)
-                int port = g_mcp_server->start(req_port, sql_cb, bind_addr, true);
+                int port = g_mcp_server->start(req_port, sql_cb, addr, true);
                 if (port <= 0) {
                     return "Error: Failed to start MCP server\n";
                 }
@@ -364,13 +377,23 @@ static void run_repl(idasql::Database& db) {
                     g_repl_http_server = std::make_unique<idasql::IDAHTTPServer>();
                 }
 
+                // With no explicit port, fall back to the pinned host/port.
+                std::string addr = bind_addr;
+                if (req_port == 0) {
+                    idasql::autostart::PinConfig pin = idasql::autostart::load();
+                    if (pin.http.port != 0) {
+                        req_port = pin.http.port;
+                        addr = pin.http.host;
+                    }
+                }
+
                 // SQL executor - called on main thread via run_until_stopped()
                 idasql::HTTPQueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
                     return query_result_to_json(db, sql);
                 };
 
                 // Start with use_queue=true (CLI mode)
-                int port = g_repl_http_server->start(req_port, sql_cb, bind_addr, true);
+                int port = g_repl_http_server->start(req_port, sql_cb, addr, true);
                 if (port <= 0) {
                     return "Error: Failed to start HTTP server\n";
                 }
@@ -413,6 +436,11 @@ static void run_repl(idasql::Database& db) {
                 }
                 return "HTTP server not running\n";
             };
+
+            // Pin commands work in the CLI too (writes persist only with
+            // -w/--write, like any other IDB edit); autostart-on-load is
+            // plugin-only.
+            idasql::wire_pin_callbacks(callbacks);
 
             std::string output;
             auto result = idasql::handle_command(line, callbacks, output);
@@ -661,8 +689,8 @@ static std::string build_cli_http_help_text() {
         << "  Header: Authorization: Bearer <token>\n"
         << "  Or:     X-XSQL-Token: <token>\n\n"
         << "Example:\n"
-        << "  curl http://localhost:8081/help\n"
-        << "  " << idasql::format_query_curl_example("http://localhost:8081") << "\n";
+        << "  curl http://localhost:8080/help\n"
+        << "  " << idasql::format_query_curl_example("http://localhost:8080") << "\n";
     return out.str();
 }
 
@@ -880,12 +908,25 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 // Main
 // ============================================================================
 
+static std::string make_upgrade_json(const idasql::Database& db, const std::string& input) {
+    const std::string message =
+        "Database upgraded from 32-bit .idb to 64-bit .i64; reopen with -s <reopen_with>.";
+    return xsql::json{
+        {"status", "upgraded"},
+        {"input", input},
+        {"reopen_with", db.upgraded_i64_path()},
+        {"upgrade_log", db.upgrade_log_path()},
+        {"message", message}
+    }.dump();
+}
+
 static void print_usage() {
     std::cerr << "idasql v" IDASQL_VERSION_STRING " - SQL interface to IDA databases\n\n"
               << "Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]\n\n"
               << "Options:\n"
               << "  -s <file>            IDA database (.idb/.i64) OR raw binary (.exe/.dll/firmware/etc.)\n"
               << "                       — raw binaries trigger fresh idalib analysis and string-list rebuild\n"
+              << "                       — legacy 32-bit .idb files upgrade to .i64 and require an explicit reopen\n"
               << "  --token <token>      Auth token for HTTP/MCP server mode (if server requires it)\n"
               << "  -q <sql>             Execute SQL query or semicolon-separated script\n"
               << "  -f <file>            Execute SQL from file\n"
@@ -907,7 +948,7 @@ static void print_usage() {
               << "  idasql -s test.i64 -i\n"
               << "  idasql -s test.i64 --export dump.sql\n"
               << "  idasql -s test.i64 --http 8080\n"
-              << "  idasql -s sample.exe --http 8081       # raw PE: idalib auto-analyzes, then serves SQL\n"
+              << "  idasql -s sample.exe --http            # raw PE: idalib auto-analyzes, then serves SQL (default port 8080)\n"
               << "  idasql -s firmware.bin -q \"SELECT * FROM welcome\"\n"
 #ifdef IDASQL_HAS_MCP
               << "  idasql -s test.i64 --mcp 9000\n";
@@ -1024,8 +1065,17 @@ int main(int argc, char* argv[]) {
     std::cerr << "Opening: " << db_path << "..." << std::endl;
     idasql::Database db;
     if (!db.open(db_path.c_str())) {
+        if (db.open_outcome() == idasql::OpenOutcome::UpgradedReopenRequired) {
+            std::cout << make_upgrade_json(db, db_path) << std::endl;
+            std::cerr << "Database was upgraded to 64-bit. Reopen with: -s "
+                      << db.upgraded_i64_path() << std::endl;
+            return 3;
+        }
         std::cerr << "Error: " << db.error() << std::endl;
         return 1;
+    }
+    if (!db.open_notice().empty()) {
+        std::cerr << db.open_notice() << std::endl;
     }
     std::cerr << "Database opened successfully." << std::endl;
 
@@ -1037,9 +1087,20 @@ int main(int argc, char* argv[]) {
                   << idapython_runtime_error << std::endl;
     }
 
+    auto save_if_requested = [&]() {
+        if (!write_mode)
+            return;
+        if (save_database()) {
+            std::cerr << "Database saved.\n";
+        } else {
+            std::cerr << "Warning: Failed to save database.\n";
+        }
+    };
+
     // HTTP server mode
     if (http_mode) {
         int http_result = run_http_mode(db, http_port, bind_addr, auth_token);
+        save_if_requested();
         db.close();
         return http_result;
     }
@@ -1084,6 +1145,7 @@ int main(int argc, char* argv[]) {
 
         std::signal(SIGINT, SIG_DFL);
         std::cout << "\nMCP server stopped.\n";
+        save_if_requested();
         db.close();
         return 0;
     }
@@ -1121,14 +1183,8 @@ int main(int argc, char* argv[]) {
         run_repl(db);
     }
 
-    // Save database if -w/--write was specified
-    if (write_mode) {
-        if (save_database()) {
-            std::cerr << "Database saved.\n";
-        } else {
-            std::cerr << "Warning: Failed to save database.\n";
-        }
-    }
+    // Save database if -w/--write was specified.
+    save_if_requested();
 
     db.close();
     return result;

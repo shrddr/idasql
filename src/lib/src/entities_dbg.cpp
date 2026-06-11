@@ -7,6 +7,8 @@
 
 #include "entities_dbg.hpp"
 
+#include "dirtree_utils.hpp"
+
 namespace idasql {
 namespace debugger {
 
@@ -32,10 +34,45 @@ const char* bpt_loc_type_name(int loc_type) {
 }
 
 std::string safe_bpt_group(const bpt_t& bpt) {
+    // A breakpoint's "group" is its folder in the DIRTREE_BPTS dirtree. Read it
+    // from the dirtree first: find_inode_path() loads the tree, so this is
+    // robust headless. The debugger-coupled get_bpt_group() returns empty under
+    // idalib whenever the bpts dirtree hasn't been loaded yet this session
+    // (order-dependent), so it is only a fallback. See safe_bpt_full_path().
+    auto path = dirtrees::find_inode_path(DIRTREE_BPTS,
+                                          static_cast<uint64_t>(bpt.bptid));
+    if (path && !path->folder_path.empty())
+        return dirtrees::normalize_relative_path(path->folder_path);
     qstring grp;
     if (get_bpt_group(&grp, bpt.loc))
-        return std::string(grp.c_str());
+        return dirtrees::normalize_relative_path(grp.c_str());
     return "";
+}
+
+std::optional<std::string> safe_bpt_folder_path(const bpt_t& bpt) {
+    std::string group = safe_bpt_group(bpt);
+    if (group.empty())
+        return std::nullopt;
+    return group;
+}
+
+std::string safe_bpt_full_path(const bpt_t& bpt) {
+    auto path = dirtrees::find_inode_path(DIRTREE_BPTS, static_cast<uint64_t>(bpt.bptid));
+    if (path)
+        return path->full_path;
+    std::string group = safe_bpt_group(bpt);
+    if (group.empty())
+        return "";
+    return "/" + group + "/" + std::to_string(bpt.bptid);
+}
+
+bool set_bpt_folder(bpt_t& bpt, xsql::FunctionArg value, const char* surface) {
+    const char* text = value.is_null() ? "" : value.as_c_str();
+    std::string normalized = dirtrees::normalize_relative_path(text ? text : "");
+    bool ok = set_bpt_group(bpt, normalized.c_str());
+    if (!ok)
+        xsql::set_vtab_error(std::string(surface) + ": failed to set breakpoint folder");
+    return ok;
 }
 
 std::string safe_bpt_loc_path(const bpt_t& bpt) {
@@ -257,7 +294,8 @@ VTableDef define_breakpoints() {
                     xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
                     return false;
                 }
-                bool ok = set_bpt_group(bpt, val);
+                std::string normalized = dirtrees::normalize_relative_path(val ? val : "");
+                bool ok = set_bpt_group(bpt, normalized.c_str());
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to set group");
                 return ok;
             })
@@ -266,6 +304,27 @@ VTableDef define_breakpoints() {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.bptid);
+        })
+        // Column 19: folder_path (RW, alias of group)
+        .column_text_nullable_rw("folder_path",
+            [](size_t i) -> std::optional<std::string> {
+                bpt_t bpt;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return std::nullopt;
+                return safe_bpt_folder_path(bpt);
+            },
+            [](size_t i, xsql::FunctionArg value) -> bool {
+                bpt_t bpt;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints.folder_path: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
+                return set_bpt_folder(bpt, value, "breakpoints.folder_path");
+            })
+        // Column 20: full_path (R)
+        .column_text("full_path", [](size_t i) -> std::string {
+            bpt_t bpt;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
+            return safe_bpt_full_path(bpt);
         })
         // DELETE support
         .deletable([](size_t i) -> bool {
@@ -409,18 +468,20 @@ VTableDef define_breakpoints() {
                 }
             }
 
-            if (is_non_null(17)) {
-                const char* grp = get_text(17);
+            int folder_col = is_non_null(19) ? 19 : 17;
+            if (is_non_null(folder_col)) {
+                const char* grp = get_text(folder_col);
                 if (grp) {
+                    std::string normalized = dirtrees::normalize_relative_path(grp);
                     bpt_t bpt;
                     int n = get_bpt_qty();
                     for (int j = n - 1; j >= 0; --j) {
                         if (getn_bpt(j, &bpt)) {
                             if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                                set_bpt_group(bpt, grp);
+                                set_bpt_group(bpt, normalized.c_str());
                                 break;
                             } else if (!is_non_null(0)) {
-                                set_bpt_group(bpt, grp);
+                                set_bpt_group(bpt, normalized.c_str());
                                 break;
                             }
                         }

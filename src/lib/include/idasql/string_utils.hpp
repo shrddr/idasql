@@ -25,6 +25,19 @@ inline std::string format_ea_hex(uint64_t ea) {
     return std::string(buf);
 }
 
+// Lowercase hex-encode a byte buffer (e.g. MD5/SHA-256 digests). Reads exactly
+// `len` bytes and builds the result via std::string, so it cannot overflow.
+inline std::string to_hex(const uint8_t* data, size_t len) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out.push_back(digits[data[i] >> 4]);
+        out.push_back(digits[data[i] & 0x0F]);
+    }
+    return out;
+}
+
 inline std::string trim_copy(const std::string& s) {
     size_t begin = 0;
     size_t end = s.size();

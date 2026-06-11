@@ -17,8 +17,8 @@
 
 namespace idasql {
 
-namespace entities {
-    struct TableRegistry;
+namespace core {
+    struct CoreRegistry;
 }
 
 namespace metadata {
@@ -29,10 +29,6 @@ namespace metadata {
 
 namespace extended {
     struct ExtendedRegistry;
-}
-
-namespace disassembly {
-    struct DisassemblyRegistry;
 }
 
 namespace types {

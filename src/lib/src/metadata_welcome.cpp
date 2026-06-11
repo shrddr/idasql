@@ -13,6 +13,7 @@
 
 #include "metadata_welcome.hpp"
 
+#include "idasql_version.hpp"
 #include "ida_headers.hpp"
 #include <idasql/string_utils.hpp>
 
@@ -21,6 +22,7 @@ namespace metadata {
 namespace {
 
 using idasql::format_ea_hex;
+using idasql::to_hex;
 
 static std::string get_primary_entry_name() {
     if (get_entry_qty() <= 0) {
@@ -36,6 +38,7 @@ static void collect_welcome(std::vector<WelcomeRow>& rows) {
     rows.clear();
 
     WelcomeRow row;
+    row.idasql_version = IDASQL_VERSION_STRING;
     row.processor = inf_get_procname().c_str();
     row.is_64bit = inf_is_64bit() ? 1 : 0;
     row.min_ea = format_ea_hex(static_cast<uint64_t>(inf_get_min_ea()));
@@ -54,6 +57,24 @@ static void collect_welcome(std::vector<WelcomeRow>& rows) {
     row.segments_count = static_cast<int>(get_segm_qty());
     row.names_count = static_cast<int>(get_nlist_size());
     row.strings_count = static_cast<int>(get_strlist_qty());
+
+    // File-identity fields. Every API is bounded by the buffer size we pass and
+    // guarded by its return code, falling back to an empty string when absent.
+    char fname[QMAXPATH];
+    row.filename = (get_root_filename(fname, sizeof(fname)) > 0) ? fname : "";
+
+    char fpath[QMAXPATH];
+    row.input_file_path = (get_input_file_path(fpath, sizeof(fpath)) > 0) ? fpath : "";
+
+    // Full path of the IDB/I64 on disk (may differ from input_file_path if moved).
+    const char* idb = get_path(PATH_TYPE_IDB);
+    row.idb_path = (idb != nullptr) ? idb : "";
+
+    uchar md5[16];
+    row.md5 = retrieve_input_file_md5(md5) ? to_hex(md5, sizeof(md5)) : "";
+
+    uchar sha256[32];
+    row.sha256 = retrieve_input_file_sha256(sha256) ? to_hex(sha256, sizeof(sha256)) : "";
 
     std::ostringstream summary;
     summary << row.processor << " " << (row.is_64bit ? "64-bit" : "32-bit");
@@ -80,6 +101,7 @@ CachedTableDef<WelcomeRow> define_welcome() {
             collect_welcome(rows);
         })
         .column_text("summary", [](const WelcomeRow& row) -> std::string { return row.summary; })
+        .column_text("idasql_version", [](const WelcomeRow& row) -> std::string { return row.idasql_version; })
         .column_text("processor", [](const WelcomeRow& row) -> std::string { return row.processor; })
         .column_int("is_64bit", [](const WelcomeRow& row) -> int { return row.is_64bit; })
         .column_text("min_ea", [](const WelcomeRow& row) -> std::string { return row.min_ea; })
@@ -90,6 +112,11 @@ CachedTableDef<WelcomeRow> define_welcome() {
         .column_int("segments_count", [](const WelcomeRow& row) -> int { return row.segments_count; })
         .column_int("names_count", [](const WelcomeRow& row) -> int { return row.names_count; })
         .column_int("strings_count", [](const WelcomeRow& row) -> int { return row.strings_count; })
+        .column_text("filename", [](const WelcomeRow& row) -> std::string { return row.filename; })
+        .column_text("input_file_path", [](const WelcomeRow& row) -> std::string { return row.input_file_path; })
+        .column_text("idb_path", [](const WelcomeRow& row) -> std::string { return row.idb_path; })
+        .column_text("md5", [](const WelcomeRow& row) -> std::string { return row.md5; })
+        .column_text("sha256", [](const WelcomeRow& row) -> std::string { return row.sha256; })
         .build();
 }
 

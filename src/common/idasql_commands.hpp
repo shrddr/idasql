@@ -41,6 +41,16 @@ struct CommandCallbacks {
     std::function<std::string()> http_status;
     std::function<std::string(int, const std::string&)> http_start;
     std::function<std::string()> http_stop;
+
+    // Autostart pin callbacks (optional). Wired by both the CLI and the plugin
+    // (see common/pin_commands.hpp); the netnode work lives behind them so this
+    // header has no IDA dependency. service is "http" | "mcp"; for pin_clear it
+    // may also be "all".
+    std::function<std::string()> pin_list;
+    std::function<std::string(const std::string& service,
+                              const std::string& bind, int port)> pin_set;
+    std::function<std::string(const std::string& service, bool enable)> pin_enable;
+    std::function<std::string(const std::string& service)> pin_clear;
 };
 
 inline void parse_bind_and_port(const std::string& raw, std::string& bind_addr, int& port) {
@@ -125,6 +135,13 @@ inline CommandResult handle_command(
                  "  .http start [bind] [port] Start HTTP server\n"
                  "  .http stop               Stop HTTP server\n"
                  "  .http help               Show HTTP help\n"
+                 "\n"
+                 "Autostart Pins:\n"
+                 "  .pin                     Show pinned autostart config\n"
+                 "  .pin set http|mcp [bind] <port>  Pin a server (plugin auto-starts on load)\n"
+                 "  .pin on|off http|mcp     Enable/disable autostart-on-load\n"
+                 "  .pin clear [http|mcp|all] Remove pinned config\n"
+                 "  .pin help                Show pin help\n"
                  "\n"
                  "SQL:\n"
                  "  SELECT * FROM funcs LIMIT 10;\n"
@@ -254,6 +271,103 @@ inline CommandResult handle_command(
                      "  " + example + "\n";
         } else {
             output = "Unknown HTTP command: " + subargs + "\nUse '.http help' for available commands.";
+        }
+        return CommandResult::HANDLED;
+    }
+
+    if (input.rfind(".pin", 0) == 0) {
+        static const char* kPinUnavailable =
+            "Autostart pinning is not available in this session.";
+
+        std::string subargs = input.length() > 4 ? input.substr(4) : "";
+        size_t s = subargs.find_first_not_of(" \t");
+        subargs = (s == std::string::npos) ? "" : subargs.substr(s);
+
+        // Pop the next whitespace-delimited token off the front of rest.
+        auto next_token = [](std::string& rest) -> std::string {
+            size_t b = rest.find_first_not_of(" \t");
+            if (b == std::string::npos) { rest.clear(); return ""; }
+            rest = rest.substr(b);
+            size_t e = rest.find_first_of(" \t");
+            std::string tok = (e == std::string::npos) ? rest : rest.substr(0, e);
+            rest = (e == std::string::npos) ? "" : rest.substr(e);
+            return tok;
+        };
+
+        if (subargs.empty() || subargs == "list") {
+            output = callbacks.pin_list ? callbacks.pin_list() : kPinUnavailable;
+        } else if (subargs == "help") {
+            output =
+                "Autostart pin commands:\n"
+                "  .pin                      Show pinned config (alias of .pin list)\n"
+                "  .pin list                 Show pinned config\n"
+#ifdef IDASQL_HAS_MCP
+                "  .pin set http [bind] <port>  Pin HTTP host/port; enables autostart\n"
+                "  .pin set mcp  [bind] <port>  Pin MCP host/port; enables autostart\n"
+                "  .pin on  http|mcp         Enable autostart-on-load for a service\n"
+                "  .pin off http|mcp         Disable autostart (keeps host/port)\n"
+                "  .pin clear [http|mcp|all] Remove pinned config (default: all)\n"
+#else
+                "  .pin set http [bind] <port>  Pin HTTP host/port; enables autostart\n"
+                "  .pin on  http             Enable autostart-on-load for HTTP\n"
+                "  .pin off http             Disable autostart (keeps host/port)\n"
+                "  .pin clear [http|all]     Remove pinned config (default: all)\n"
+#endif
+                "  .pin help                 Show this help\n"
+                "\n"
+#ifdef IDASQL_HAS_MCP
+                "Pins are stored in the IDB. The plugin auto-starts enabled\n"
+                "services when the database is opened; '.http start' / '.mcp start'\n"
+                "with no explicit port reuse the pinned host/port. The port is\n"
+                "required on '.pin set'; bind defaults to 127.0.0.1.\n";
+#else
+                "Pins are stored in the IDB. The plugin auto-starts the enabled\n"
+                "service when the database is opened; '.http start' with no\n"
+                "explicit port reuses the pinned host/port. The port is\n"
+                "required on '.pin set'; bind defaults to 127.0.0.1.\n";
+#endif
+        } else {
+            std::string verb = next_token(subargs);
+            if (verb == "set") {
+                std::string service = next_token(subargs);
+                if (service != "http" && service != "mcp") {
+                    output = "Usage: .pin set http|mcp [bind] <port>";
+                } else {
+                    std::string bind_addr;
+                    int port = 0;
+                    parse_bind_and_port(subargs, bind_addr, port);
+                    if (port <= 0) {
+                        output = "Error: .pin set requires an explicit port (e.g. '.pin set "
+                                 + service + " 8080').";
+                    } else if (callbacks.pin_set) {
+                        output = callbacks.pin_set(service, bind_addr, port);
+                    } else {
+                        output = kPinUnavailable;
+                    }
+                }
+            } else if (verb == "on" || verb == "off") {
+                std::string service = next_token(subargs);
+                if (service != "http" && service != "mcp") {
+                    output = "Usage: .pin " + verb + " http|mcp";
+                } else if (callbacks.pin_enable) {
+                    output = callbacks.pin_enable(service, verb == "on");
+                } else {
+                    output = kPinUnavailable;
+                }
+            } else if (verb == "clear") {
+                std::string service = next_token(subargs);
+                if (service.empty()) service = "all";
+                if (service != "http" && service != "mcp" && service != "all") {
+                    output = "Usage: .pin clear [http|mcp|all]";
+                } else if (callbacks.pin_clear) {
+                    output = callbacks.pin_clear(service);
+                } else {
+                    output = kPinUnavailable;
+                }
+            } else {
+                output = "Unknown pin command: " + verb
+                         + "\nUse '.pin help' for available commands.";
+            }
         }
         return CommandResult::HANDLED;
     }
