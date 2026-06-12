@@ -520,7 +520,6 @@ query you learn against one tool largely carries over to the others — e.g. the
 same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
 
 **Reverse-engineering platforms**
-- **idasql** (this project) — IDA Pro databases as SQL.
 - **[bnsql](https://github.com/0xeb/bnsql)** — Binary Ninja databases as SQL.
 - **[ghidrasql](https://github.com/0xeb/ghidrasql)** — Ghidra databases as SQL.
 
