@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.jpg" alt="IDASQL logo" width="360">
+</p>
+
 # IDASQL
 
 **Give any AI agent the ability to understand compiled binaries.**
