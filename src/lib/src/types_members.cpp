@@ -7,8 +7,60 @@
 
 #include "types_members.hpp"
 
+#include <cctype>
+
 namespace idasql {
 namespace types {
+
+namespace {
+
+// Parse types_members type text, including suffix array forms such as char[256].
+bool parse_member_type(const std::string& type_text, tinfo_t& out_type) {
+    const std::string type = trim_copy(type_text);
+    if (type.empty()) return false;
+
+    size_t type_end = type.size();
+    std::string array_suffix;
+    while (type_end > 0 && type[type_end - 1] == ']') {
+        size_t depth = 0;
+        size_t open = type_end;
+        for (size_t i = type_end; i-- > 0;) {
+            if (type[i] == ']') {
+                ++depth;
+            } else if (type[i] == '[' && --depth == 0) {
+                open = i;
+                break;
+            }
+        }
+        if (open == type_end) return false;
+        array_suffix.insert(0, type.substr(open, type_end - open));
+        type_end = open;
+        while (type_end > 0 && std::isspace(static_cast<unsigned char>(type[type_end - 1]))) {
+            --type_end;
+        }
+    }
+
+    const std::string base_type = trim_copy(type.substr(0, type_end));
+    if (base_type.empty()) return false;
+
+    const std::string declaration = base_type + " __idasql_member" + array_suffix + ";";
+    qstring parsed_name;
+    return parse_decl(&out_type, &parsed_name, nullptr, declaration.c_str(), PT_SIL);
+}
+
+void refresh_member_type_fields(MemberEntry& entry, const udm_t& member, til_t* ti) {
+    entry.size = static_cast<int64_t>(member.size / 8);
+    entry.size_bits = static_cast<int64_t>(member.size);
+
+    qstring type_str;
+    member.type.print(&type_str);
+    entry.member_type = type_str.c_str();
+    classify_member_type(member.type, ti,
+        entry.mt_is_struct, entry.mt_is_union, entry.mt_is_enum,
+        entry.mt_is_ptr, entry.mt_is_array, entry.member_type_ordinal);
+}
+
+} // namespace
 
 int get_type_ordinal_by_name(til_t* ti, const char* type_name) {
     if (!ti || !type_name || !type_name[0]) return -1;
@@ -194,7 +246,9 @@ TypeMemberRef::TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
 bool TypeMemberRef::save() {
     if (!valid) return false;
     tinfo_t new_tif;
-    new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
+    if (!new_tif.create_udt(udt)) {
+        return false;
+    }
     return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr) == TERR_OK;
 }
 
@@ -306,9 +360,68 @@ CachedTableDef<MemberEntry> define_types_members() {
         .column_int64("size_bits", [](const MemberEntry& row) -> int64_t {
             return row.size_bits;
         })
-        .column_text("member_type", [](const MemberEntry& row) -> std::string {
-            return row.member_type;
-        })
+        .column_text_rw("member_type",
+            [](const MemberEntry& row) -> std::string {
+                return row.member_type;
+            },
+            [](MemberEntry& row, xsql::FunctionArg val) -> bool {
+                const std::string ctx = "type=" + row.type_name + " member=" + std::to_string(row.member_index);
+                if (val.is_nochange()) return true;
+                if (val.is_null()) {
+                    xsql::set_vtab_error("types_members: member_type cannot be NULL (" + ctx + ")");
+                    return false;
+                }
+
+                tinfo_t member_type;
+                const std::string type_text = val.as_text();
+                if (!parse_member_type(type_text, member_type)) {
+                    xsql::set_vtab_error("types_members: failed to parse member_type '" + type_text + "' (" + ctx + ")");
+                    return false;
+                }
+
+                const asize_t member_size = member_type.get_size();
+                if (member_size == BADSIZE) {
+                    xsql::set_vtab_error("types_members: member_type has no fixed size '" + type_text + "' (" + ctx + ")");
+                    return false;
+                }
+
+                TypeMemberRef ref(row.type_ordinal);
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_members: type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) {
+                    xsql::set_vtab_error("types_members: member index out of range (" + ctx + ")");
+                    return false;
+                }
+                if (ref.udt[row.member_index].size != member_size * 8) {
+                    xsql::set_vtab_error(
+                        "types_members: member_type cannot change member size without changing UDT layout (" + ctx + ")");
+                    return false;
+                }
+
+                tinfo_t updated_tif;
+                if (!updated_tif.get_named_type(get_idati(), row.type_name.c_str())) {
+                    xsql::set_vtab_error("types_members: failed to load type for member_type update (" + ctx + ")");
+                    return false;
+                }
+                if (updated_tif.set_udm_type(static_cast<size_t>(row.member_index), member_type) != TERR_OK) {
+                    xsql::set_vtab_error("types_members: failed to update member_type (" + ctx + ")");
+                    return false;
+                }
+
+                udt_type_data_t updated_udt;
+                if (!updated_tif.get_udt_details(&updated_udt)
+                    || static_cast<size_t>(row.member_index) >= updated_udt.size()) {
+                    xsql::set_vtab_error("types_members: failed to refresh member_type (" + ctx + ")");
+                    return false;
+                }
+                const udm_t& updated_member = updated_udt[row.member_index];
+                row.offset = static_cast<int64_t>(updated_member.offset / 8);
+                row.offset_bits = static_cast<int64_t>(updated_member.offset);
+                refresh_member_type_fields(row, updated_member, get_idati());
+                return true;
+            })
         .column_int("is_bitfield", [](const MemberEntry& row) -> int {
             return row.is_bitfield ? 1 : 0;
         })
@@ -382,15 +495,17 @@ CachedTableDef<MemberEntry> define_types_members() {
                 if (mt && mt[0]) type_str = mt;
             }
             tinfo_t member_type;
-            qstring parsed_name;
-            if (parse_decl(&member_type, &parsed_name, nullptr,
-                           (type_str + " x;").c_str(), PT_SIL)) {
-                new_member.type = member_type;
-                new_member.size = member_type.get_size() * 8;
-            } else {
-                new_member.type = tinfo_t(BT_INT32);
-                new_member.size = 32;
+            if (!parse_member_type(type_str, member_type)) {
+                xsql::set_vtab_error("types_members: failed to parse member_type '" + type_str + "'");
+                return false;
             }
+            const asize_t member_size = member_type.get_size();
+            if (member_size == BADSIZE) {
+                xsql::set_vtab_error("types_members: member_type has no fixed size '" + type_str + "'");
+                return false;
+            }
+            new_member.type = member_type;
+            new_member.size = member_size * 8;
             if (argc > 11 && !argv[11].is_null()) {
                 const char* cmt = argv[11].as_c_str();
                 if (cmt) new_member.cmt = cmt;
