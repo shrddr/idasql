@@ -195,7 +195,7 @@ bool TypeMemberRef::save() {
     if (!valid) return false;
     tinfo_t new_tif;
     new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
-    return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+    return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr) == TERR_OK;
 }
 
 // ============================================================================
