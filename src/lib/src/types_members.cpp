@@ -8,6 +8,7 @@
 #include "types_members.hpp"
 
 #include <cctype>
+#include <limits>
 
 namespace idasql {
 namespace types {
@@ -510,6 +511,94 @@ CachedTableDef<MemberEntry> define_types_members() {
                 const char* cmt = argv[11].as_c_str();
                 if (cmt) new_member.cmt = cmt;
             }
+
+            const bool has_explicit_offset = argc > 4 && !argv[4].is_null();
+            const bool is_union = ref.tif.is_union();
+            if (has_explicit_offset) {
+                const int64_t requested_offset = argv[4].as_int64();
+                if (requested_offset < 0) {
+                    xsql::set_vtab_error("types_members: offset must be >= 0");
+                    return false;
+                }
+                if (is_union && requested_offset != 0) {
+                    xsql::set_vtab_error("types_members: union member offset must be 0");
+                    return false;
+                }
+
+                const uint64_t offset = static_cast<uint64_t>(requested_offset);
+                const uint64_t size = static_cast<uint64_t>(member_size);
+                if (offset > std::numeric_limits<uint64_t>::max() / 8
+                    || offset > std::numeric_limits<uint64_t>::max() - size) {
+                    xsql::set_vtab_error("types_members: offset is too large");
+                    return false;
+                }
+                const uint64_t end_offset = offset + size;
+
+                const char* type_name = get_numbered_type_name(get_idati(), ordinal);
+                tinfo_t layout_tif;
+                if (!type_name || !layout_tif.get_named_type(get_idati(), type_name)) {
+                    xsql::set_vtab_error("types_members: failed to load type for member insertion");
+                    return false;
+                }
+
+                // A struct may only receive an explicitly positioned member in an
+                // explicit TAFLD_GAP member, implicit padding (reported by
+                // calc_gaps()), or at/past the current UDT extent.
+                const ssize_t best_fit_index = ref.udt.get_best_fit_member(offset);
+                bool fits_explicit_gap = false;
+                if (!is_union) {
+                    if (best_fit_index >= 0) {
+                        const udm_t& member = ref.udt[best_fit_index];
+                        const uint64_t member_offset = member.offset / 8;
+                        const uint64_t member_end = member_offset + member.size / 8;
+                        if (member.is_gap()
+                            && member_offset <= offset
+                            && end_offset <= member_end) {
+                            fits_explicit_gap = true;
+                        }
+                    }
+                    const bool extends_past_end = offset >= layout_tif.get_size();
+                    if (!fits_explicit_gap && !extends_past_end) {
+                        rangeset_t gaps;
+                        if (!layout_tif.calc_gaps(&gaps)) {
+                            xsql::set_vtab_error("types_members: failed to calculate padding gaps");
+                            return false;
+                        }
+                        if (!gaps.includes(range_t(offset, end_offset))) {
+                            xsql::set_vtab_error("types_members: offset range is not an unoccupied padding gap");
+                            return false;
+                        }
+                    }
+                }
+
+                new_member.offset = offset * 8;
+                const ssize_t insert_index = is_union ? 0
+                    : fits_explicit_gap
+                    ? best_fit_index
+                    : best_fit_index < 0 ? 0 : best_fit_index + 1;
+
+                // Edit a detached tinfo first, then persist only after the
+                // requested location survives IDA's normal layout calculation.
+                tinfo_t candidate = ref.tif;
+                if (candidate.add_udm(new_member, ETF_NO_LAYOUT, 1,
+                                      insert_index) != TERR_OK) {
+                    xsql::set_vtab_error("types_members: failed to insert member at offset");
+                    return false;
+                }
+                udm_t inserted_member;
+                if (candidate.get_udm_by_offset(&inserted_member, new_member.offset) < 0
+                    || inserted_member.is_gap()
+                    || inserted_member.name != new_member.name) {
+                    xsql::set_vtab_error("types_members: IDA could not preserve the requested offset");
+                    return false;
+                }
+                if (candidate.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr) != TERR_OK) {
+                    xsql::set_vtab_error("types_members: failed to save inserted member");
+                    return false;
+                }
+                return true;
+            }
+
             if (!ref.udt.empty()) {
                 const udm_t& last = ref.udt.back();
                 new_member.offset = last.offset + last.size;

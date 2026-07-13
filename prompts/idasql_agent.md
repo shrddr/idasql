@@ -475,8 +475,17 @@ INSERT INTO types (name, kind) VALUES ('my_union', 'union');
 -- Add a struct member with type
 INSERT INTO types_members (type_ordinal, member_name, member_type) VALUES (42, 'field1', 'int');
 
+-- Add a member at an explicit byte offset
+INSERT INTO types_members (type_ordinal, member_name, offset, member_type)
+VALUES (42, 'field_at_16', 16, 'int');
+
 -- Add a struct member (name only, default type)
 INSERT INTO types_members (type_ordinal, member_name) VALUES (42, 'field2');
+
+When `offset` is omitted, INSERT appends the member. For structs, a supplied
+non-negative byte offset may fit in free padding or be at/past the current
+extent; INSERT rejects ranges that overlap members. Union members must use
+offset 0.
 
 -- Add an enum value
 INSERT INTO types_enum_values (type_ordinal, value_name, value) VALUES (15, 'FLAG_ACTIVE', 1);
