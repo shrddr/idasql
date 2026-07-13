@@ -587,7 +587,9 @@ SELECT ordinal, name, folder_path FROM types WHERE folder_path LIKE 'idasql/type
 ```
 
 #### types_members
-Struct/union members keyed by `type_ordinal`. Full CRUD. Columns + worked examples: see the `types` skill.
+Struct/union members keyed by `type_ordinal`. Full CRUD. `DELETE` undefines the
+member and preserves the resulting layout gap, matching IDA's interactive
+behavior. Columns + worked examples: see the `types` skill.
 
 #### types_enum_values
 Enum constant values keyed by `type_ordinal`. Full CRUD. Columns + examples: see the `types` skill.

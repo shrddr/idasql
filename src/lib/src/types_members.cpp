@@ -469,11 +469,25 @@ CachedTableDef<MemberEntry> define_types_members() {
             return row.member_type_ordinal;
         })
         .deletable([](MemberEntry& row) -> bool {
+            const std::string ctx = "type=" + row.type_name + " member=" + std::to_string(row.member_index);
             TypeMemberRef ref(row.type_ordinal);
-            if (!ref.valid) return false;
-            if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
-            ref.udt.erase(ref.udt.begin() + row.member_index);
-            return ref.save();
+            if (!ref.valid) {
+                xsql::set_vtab_error("types_members: type not found (" + ctx + ")");
+                return false;
+            }
+            if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) {
+                xsql::set_vtab_error("types_members: member index out of range (" + ctx + ")");
+                return false;
+            }
+
+            // Use IDA's UDT editing API instead of rebuilding the member vector.
+            // The latter recalculates the layout and shifts every following member;
+            // this mirrors the UI's "undefine member" operation by retaining a gap.
+            if (ref.tif.del_udm(static_cast<size_t>(row.member_index), ETF_NO_LAYOUT) != TERR_OK) {
+                xsql::set_vtab_error("types_members: failed to undefine member (" + ctx + ")");
+                return false;
+            }
+            return true;
         })
         .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             if (argc < 4

@@ -296,7 +296,7 @@ Notes:
 | Table | Description |
 |-------|-------------|
 | `types` | Type library - structs, unions, enums with members (INSERT/UPDATE/DELETE) |
-| `types_members` | Struct/union member details (INSERT/UPDATE/DELETE) |
+| `types_members` | Struct/union member details (INSERT/UPDATE/DELETE; DELETE undefines and retains the gap) |
 | `types_enum_values` | Enum member values (INSERT/UPDATE/DELETE) |
 | `types_func_args` | Function type argument details |
 | `local_types` | Local type library entries |
